@@ -69,7 +69,7 @@ mod tests {
         fn on_error(&self) {}
     }
     impl StreamOutput for AudioOutput {
-        fn did_output_sample_buffer(&self, sample: CMSampleBuffer, of_type: SCStreamOutputType) {
+        fn did_output_sample_buffer(&mut self, sample: CMSampleBuffer, of_type: SCStreamOutputType) {
             match of_type {
                 SCStreamOutputType::Screen => {}
                 SCStreamOutputType::Audio => {
@@ -79,7 +79,7 @@ mod tests {
         }
     }
     impl StreamOutput for ScreenOutput {
-        fn did_output_sample_buffer(&self, sample: CMSampleBuffer, of_type: SCStreamOutputType) {
+        fn did_output_sample_buffer(&mut self, sample: CMSampleBuffer, of_type: SCStreamOutputType) {
             match of_type {
                 SCStreamOutputType::Screen => {
                     self.video_tx.send(sample).ok();

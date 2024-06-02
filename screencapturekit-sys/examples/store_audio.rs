@@ -67,6 +67,7 @@ impl UnsafeSCStreamOutput for StoreAudioHandler {
     }
 }
 
+
 fn main() {
     let display = UnsafeSCShareableContent::get()
         .unwrap()
@@ -79,9 +80,11 @@ fn main() {
     let filter = UnsafeContentFilter::init(UnsafeInitParams::Display(display));
 
     let config = UnsafeStreamConfiguration {
-        width,
-        height,
+        width: 1,
+        height: 1,
         captures_audio: BOOL::from(true),
+        channel_count: 1,
+        sample_rate: 16_000,
         excludes_current_process_audio: BOOL::from(true),
         ..Default::default()
     };

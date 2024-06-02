@@ -25,7 +25,7 @@ pub(crate) struct UnsafeSCStreamOutputHandler {
 unsafe impl Message for UnsafeSCStreamOutputHandler {}
 
 pub trait UnsafeSCStreamOutput: Send + Sync + 'static {
-    fn did_output_sample_buffer(&self, sample_buffer_ref: Id<CMSampleBufferRef>, of_type: u8);
+    fn did_output_sample_buffer(&mut self, sample_buffer_ref: Id<CMSampleBufferRef>, of_type: u8);
 }
 
 impl INSObject for UnsafeSCStreamOutputHandler {
@@ -48,8 +48,8 @@ impl INSObject for UnsafeSCStreamOutputHandler {
                     }
                     let sample: Id<CMSampleBufferRef> = Id::from_ptr(sample_ref.cast());
                     let handler_trait_ptr_address = this.get_ivar::<usize>("_output_handler");
-                    let lookup = OUTPUT_HANDLERS.read().unwrap();
-                    let output_handler_trait = lookup.get(handler_trait_ptr_address).unwrap();
+                    let mut lookup = OUTPUT_HANDLERS.write().unwrap();
+                    let output_handler_trait: &mut Box<dyn UnsafeSCStreamOutput + Send + Sync> = lookup.get_mut(handler_trait_ptr_address).unwrap();
                     output_handler_trait.did_output_sample_buffer(sample, of_type)
                 };
             }
@@ -102,7 +102,7 @@ mod tests {
     #[repr(C)]
     struct TestHandler {}
     impl UnsafeSCStreamOutput for TestHandler {
-        fn did_output_sample_buffer(&self, sample: Id<CMSampleBufferRef>, of_type: u8) {
+        fn did_output_sample_buffer(&mut self, sample: Id<CMSampleBufferRef>, of_type: u8) {
             println!("GOT SAMPLE! {:?} {}", sample, of_type);
         }
     }

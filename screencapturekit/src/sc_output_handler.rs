@@ -11,7 +11,7 @@ pub enum SCStreamOutputType {
     Audio,
 }
 pub trait StreamOutput: Sync + Send + 'static {
-    fn did_output_sample_buffer(&self, sample_buffer: CMSampleBuffer, of_type: SCStreamOutputType);
+    fn did_output_sample_buffer(&mut self, sample_buffer: CMSampleBuffer, of_type: SCStreamOutputType);
 }
 
 pub(crate) struct StreamOutputWrapper<T: StreamOutput>(T);
@@ -23,7 +23,7 @@ impl<T: StreamOutput> StreamOutputWrapper<T> {
 }
 
 impl<TOutput: StreamOutput> UnsafeSCStreamOutput for StreamOutputWrapper<TOutput> {
-    fn did_output_sample_buffer(&self, sample_buffer_ref: Id<CMSampleBufferRef>, of_type: u8) {
+    fn did_output_sample_buffer(&mut self, sample_buffer_ref: Id<CMSampleBufferRef>, of_type: u8) {
         self.0.did_output_sample_buffer(
             CMSampleBuffer::new(sample_buffer_ref),
             match of_type {
