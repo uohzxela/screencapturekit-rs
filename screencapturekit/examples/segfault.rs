@@ -315,7 +315,7 @@ fn main() {
      */
     // This is recommended to be smaller than the time wparams.audio_ctx
     // represents so an iteration can fit in one chunk.
-    const iter_threshold_ms: i32 = trigger_ms * 25;
+    const iter_threshold_ms: i32 = trigger_ms * 20;
     const n_samples_iter_threshold: i32 = ((iter_threshold_ms as f32 / 1000.0) * WHISPER_SAMPLE_RATE as f32) as i32;
 
     /* VAD parameters */
@@ -428,7 +428,7 @@ fn main() {
         wparams.set_print_timestamps(false);
         wparams.set_translate(false);
         wparams.set_single_segment(false);
-        wparams.set_max_tokens(32);
+        wparams.set_max_tokens(64);
         wparams.set_language(Some("en"));
         wparams.set_n_threads(8);
         wparams.set_audio_ctx(0);
