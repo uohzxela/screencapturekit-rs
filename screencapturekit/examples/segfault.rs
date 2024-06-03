@@ -1,5 +1,6 @@
-use std::{cmp::min, fs::File, io::BufWriter, path::PathBuf, sync::{atomic::{AtomicBool, Ordering}, Arc, Mutex}, thread::{self, sleep}, time::{self, Duration, Instant}};
+use std::{cmp::min, fs::File, io::{self, BufWriter, Write}, path::PathBuf, sync::{atomic::{AtomicBool, Ordering}, Arc, Mutex}, thread::{self, sleep}, time::{self, Duration, Instant}};
 
+use console::Term;
 use hound::{WavSpec, WavWriter};
 use rodio::{buffer::SamplesBuffer, OutputStream, OutputStreamHandle, Source};
 use screencapturekit::{
@@ -13,6 +14,7 @@ use screencapturekit::{
 };
 use screencapturekit_sys::os_types::geometry::{CGPoint, CGRect, CGSize};
 use swap_buffer_queue::{buffer::VecBuffer, Queue};
+use termion::{cursor::DetectCursorPos, raw::IntoRawMode};
 use whisper_rs::{FullParams, SamplingStrategy, WhisperContext, WhisperContextParameters};
 use once_cell::sync::Lazy;
 use crossbeam::channel::{unbounded, Receiver, Sender};
@@ -218,7 +220,6 @@ impl AudioAsync {
 }
 
 pub struct Capturer {
-    audio_writer: AudioFileWriter,
     stream_handle: OutputStreamHandle,
     buffer: Vec<f32>,
     tx: Sender<Vec<f32>>,
@@ -229,10 +230,9 @@ pub struct Capturer {
 
 impl Capturer {
     pub fn new(audio_file_path: &str, sample_rate: u32, channels: u16, tx: Sender<Vec<f32>>) -> Self {
-        let audio_writer = AudioFileWriter::new(audio_file_path, sample_rate, channels);
+        // let audio_writer = AudioFileWriter::new(audio_file_path, sample_rate, channels);
         let (_stream, stream_handle) = OutputStream::try_default().unwrap();
         Capturer {
-            audio_writer,
             stream_handle,
             buffer: Default::default(),
             tx,
@@ -356,6 +356,10 @@ fn main() {
 
     println!("Waiting for Ctrl-C...");
 
+    let mut term = Term::stdout();
+
+    let mut prev_num_segments: Option<i32> = None;
+
     while running.load(Ordering::SeqCst) {
         let start_time = Instant::now();
         loop {
@@ -404,7 +408,7 @@ fn main() {
 
             // sleep(Duration::from_millis(10));
         }
-        let duration = start_time.elapsed();
+        let duration_spinloop = start_time.elapsed();
         // println!("Execution time of spinloop: {:?}", duration);
         // println!("callback count: {}", audio.capturer.lock().unwrap().callback_count);
         audio.capturer.lock().unwrap().callback_count = 0;
@@ -447,26 +451,52 @@ fn main() {
         let duration = start_time.elapsed();
         // println!("Execution time of full_whisper: {:?}", duration);
 
+        // let mut stdout = std::io::stdout().into_raw_mode().unwrap();
+        // let (row, col) = stdout.cursor_pos().unwrap();
+        // print!("{}{}", termion::clear::CurrentLine, termion::cursor::Goto(col, row));
+
+        // if let Some(num) = prev_num_segments {
+        //     if num > 0 {
+
+        //     }
+        // }
+
         // fetch the results
         let num_segments = state
             .full_n_segments()
             .expect("failed to get number of segments");
+        prev_num_segments = Some(num_segments);
+        if num_segments > 0 {
+            term.clear_line().unwrap();
+        } else {
+            panic!("no segment")
+        }
         for i in 0..num_segments {
             let segment = state
                 .full_get_segment_text(i)
                 .expect("failed to get segment");
-            let start_timestamp = state
-                .full_get_segment_t0(i)
-                .expect("failed to get segment start timestamp");
-            let end_timestamp = state
-                .full_get_segment_t1(i)
-                .expect("failed to get segment end timestamp");
-            println!("[{} - {}]: {}", start_timestamp, end_timestamp, segment);
+            if segment.len() == 0 {
+                panic!("empty segment")
+            }
+            term.write_fmt(format_args!("{}", segment)).unwrap();
+
+            io::stdout().flush().unwrap();
+
+            // let start_timestamp = state
+            //     .full_get_segment_t0(i)
+            //     .expect("failed to get segment start timestamp");
+            // let end_timestamp = state
+            //     .full_get_segment_t1(i)
+            //     .expect("failed to get segment end timestamp");
+            // println!("[{} - {}]: {}", start_timestamp, end_timestamp, segment);
         }
 
         if pcmf32.len() as i32 > n_samples_iter_threshold {
             pcmf32.clear();
+            write!(term, "\n").unwrap();
         }
+
+        io::stdout().flush().unwrap();
 
     }
     println!("Got it! Exiting...");

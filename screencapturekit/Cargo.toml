@@ -25,6 +25,7 @@ ci = []
 path = "./src/lib.rs"
 
 [dependencies]
+console = "0.15.8"
 crossbeam = "0.8.4"
 ctrlc = "3.4.4"
 hound = "3.5.1"
@@ -32,4 +33,5 @@ once_cell = "1.19.0"
 rodio = "0.18.1"
 screencapturekit-sys = { version = "0.2.8", path = "../screencapturekit-sys" }
 swap-buffer-queue = "0.2.0"
+termion = "4.0.0"
 whisper-rs = { git = "https://github.com/hlhr202/whisper-rs.git", branch = "feature/fix-metal", features = ["metal"] }
