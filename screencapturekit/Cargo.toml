@@ -26,8 +26,10 @@ path = "./src/lib.rs"
 
 [dependencies]
 crossbeam = "0.8.4"
+ctrlc = "3.4.4"
 hound = "3.5.1"
 once_cell = "1.19.0"
 rodio = "0.18.1"
 screencapturekit-sys = { version = "0.2.8", path = "../screencapturekit-sys" }
-whisper-rs = "0.11.1"
+swap-buffer-queue = "0.2.0"
+whisper-rs = { version = "0.11.1", features = ["metal"] }
