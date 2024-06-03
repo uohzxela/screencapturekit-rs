@@ -15,7 +15,7 @@ use screencapturekit_sys::os_types::geometry::{CGPoint, CGRect, CGSize};
 use swap_buffer_queue::{buffer::VecBuffer, Queue};
 use whisper_rs::{FullParams, SamplingStrategy, WhisperContext, WhisperContextParameters};
 use once_cell::sync::Lazy;
-use crossbeam::channel::{unbounded, Sender};
+use crossbeam::channel::{unbounded, Receiver, Sender};
 
 struct ErrorHandler;
 impl StreamErrorHandler for ErrorHandler {
@@ -67,7 +67,8 @@ impl StreamOutput for CapturerWrapper {
 
 struct AudioAsyncNew {
     capturer: Arc<Mutex<Capturer>>,
-    stream: Arc<SCStream>
+    stream: Arc<SCStream>,
+    rx: Receiver<Vec<f32>>
 }
 
 impl AudioAsyncNew {
@@ -92,7 +93,7 @@ impl AudioAsyncNew {
             ..Default::default()
         };
 
-        let (tx, rx) = unbounded::<f32>();
+        let (tx, rx) = unbounded::<Vec<f32>>();
 
         let mut stream = SCStream::new(filter, stream_config, ErrorHandler);
         let capturer = Capturer::new("asdf.wav", 16_000, 1, tx);
@@ -102,7 +103,8 @@ impl AudioAsyncNew {
         let stream_clone = Arc::new(stream);
         let res = AudioAsyncNew {
             capturer: capturer_wrapper2.capturer.clone(),
-            stream: stream_clone
+            stream: stream_clone,
+            rx
         };
 
 
@@ -121,6 +123,10 @@ impl AudioAsyncNew {
     // fn get_queue(&self) -> &Queue<VecBuffer<f32>> {
     //     &self.capturer.lock().unwrap().queue
     // }
+
+    fn try_recv(&self) -> Result<Vec<f32>, crossbeam::channel::TryRecvError> {
+        self.rx.try_recv()
+    }
 
     fn start(&self) {
         self.stream.start_capture().unwrap();
@@ -215,13 +221,14 @@ pub struct Capturer {
     audio_writer: AudioFileWriter,
     stream_handle: OutputStreamHandle,
     buffer: Vec<f32>,
-    tx: Sender<f32>,
+    tx: Sender<Vec<f32>>,
     queue: Queue<VecBuffer<f32>>,
-    audio_async: AudioAsync
+    audio_async: AudioAsync,
+    callback_count: i32
 }
 
 impl Capturer {
-    pub fn new(audio_file_path: &str, sample_rate: u32, channels: u16, tx: Sender<f32>) -> Self {
+    pub fn new(audio_file_path: &str, sample_rate: u32, channels: u16, tx: Sender<Vec<f32>>) -> Self {
         let audio_writer = AudioFileWriter::new(audio_file_path, sample_rate, channels);
         let (_stream, stream_handle) = OutputStream::try_default().unwrap();
         Capturer {
@@ -230,7 +237,8 @@ impl Capturer {
             buffer: Default::default(),
             tx,
             queue: Queue::with_capacity(16_000 * 100),
-            audio_async: AudioAsync::new(16_000, 100_000)
+            audio_async: AudioAsync::new(16_000, 100_000),
+            callback_count: 0
         }
     }
 }
@@ -245,14 +253,16 @@ static mut AUDIO_BUFFER: Lazy<Vec<f32>> = Lazy::new(|| Default::default());
 
 impl StreamOutput for Capturer {
     fn did_output_sample_buffer(&mut self, sample: CMSampleBuffer, of_type: SCStreamOutputType) {
+        // println!("[Capturer] thread id: {:?}", std::thread::current().id());
         // println!("New frame recvd");
         // println!("of_type: {:?}", of_type);
         // Assuming the audio writer is initialized and accessible
-
+        self.callback_count += 1;
         let buffers = sample.sys_ref.get_av_audio_buffer_list();
         for buf in buffers.iter() {
             // println!("number of channels: {}, data len: {:?}", buf.number_channels, buf.data.len());
             let samples: Vec<f32> = u8_to_pcmf32(&buf.data);
+            // self.tx.send(samples);
             for sample in samples {
                 self.queue.try_enqueue([sample]).unwrap();
             }
@@ -345,6 +355,7 @@ fn main() {
     }).expect("Error setting Ctrl-C handler");
 
     println!("Waiting for Ctrl-C...");
+
     while running.load(Ordering::SeqCst) {
         let start_time = Instant::now();
         loop {
@@ -352,6 +363,25 @@ fn main() {
             let queue = &audio.capturer.lock().unwrap().queue;
             let duration = start_time.elapsed();
             // println!("Execution time of lock acquisition: {:?}", duration);
+
+            // while let Ok(mut samples) = audio.try_recv() {
+            //     pcmf32_new.append(&mut samples);
+            //     // if pcmf32_new.len() as i32 > n_samples_trigger {
+            //     //     break;
+            //     // }
+            // }
+
+            // if pcmf32_new.len() as i32 > n_samples_iter_threshold {
+            //     println!("WARNING: cannot process audio fast enough, dropping audio ...");
+            //     // clear audio
+            //     pcmf32_new.clear();
+            //     continue;
+            // }
+
+            // if pcmf32_new.len() as i32 > n_samples_trigger {
+            //     break;
+            // }
+
             if queue.len() as i32 > n_samples_iter_threshold {
                 println!("WARNING: cannot process audio fast enough, dropping audio ...");
                 // clear audio
@@ -365,16 +395,27 @@ fn main() {
                     break;
                 } else {
                     println!("alex");
+                    sleep(Duration::from_millis(1));
                     continue;
                 }
             }
 
-            sleep(Duration::from_millis(1));
+            // println!("queue len not enough: {}", queue.len());
+
+            // sleep(Duration::from_millis(10));
         }
         let duration = start_time.elapsed();
-        println!("Execution time of spinloop: {:?}", duration);
+        // println!("Execution time of spinloop: {:?}", duration);
+        // println!("callback count: {}", audio.capturer.lock().unwrap().callback_count);
+        audio.capturer.lock().unwrap().callback_count = 0;
+
+        // println!("[main] thread id: {:?}", std::thread::current().id());
 
         pcmf32.append(&mut pcmf32_new);
+
+        if pcmf32.len() <= WHISPER_SAMPLE_RATE as usize {
+            pcmf32.append(&mut vec![0.0 as f32; WHISPER_SAMPLE_RATE as usize - pcmf32.len() + 1600])
+        }
 
         let mut wparams = FullParams::new(SamplingStrategy::Greedy { best_of: 1 });
         wparams.set_print_progress(false);
@@ -392,17 +433,19 @@ fn main() {
 
         let start_time = Instant::now();
 
+        // sleep(Duration::from_secs(2));
+
         // continue;
 
         // now we can run the model
         let data = &pcmf32[..];
-        println!("transcribing {} samples", data.len());
+        // println!("transcribing {} samples", data.len());
         state
             .full(wparams, data)
             .expect("failed to run model");
 
         let duration = start_time.elapsed();
-        println!("Execution time of full_whisper: {:?}", duration);
+        // println!("Execution time of full_whisper: {:?}", duration);
 
         // fetch the results
         let num_segments = state
@@ -419,6 +462,10 @@ fn main() {
                 .full_get_segment_t1(i)
                 .expect("failed to get segment end timestamp");
             println!("[{} - {}]: {}", start_timestamp, end_timestamp, segment);
+        }
+
+        if pcmf32.len() as i32 > n_samples_iter_threshold {
+            pcmf32.clear();
         }
 
     }
@@ -452,7 +499,7 @@ fn main2() {
         ..Default::default()
     };
 
-    let (tx, rx) = unbounded::<f32>();
+    let (tx, rx) = unbounded::<Vec<f32>>();
 
     let mut stream = SCStream::new(filter, stream_config, ErrorHandler);
     let capturer = Capturer::new("asdf.wav", 16_000, 1, tx);

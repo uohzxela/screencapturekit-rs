@@ -42,6 +42,7 @@ impl INSObject for UnsafeSCStreamOutputHandler {
                 sample_ref: *mut Object,
                 of_type: u8,
             ) {
+                // println!("[UnsafeSCStreamOutputHandler] thread id: {:?}", std::thread::current().id());
                 unsafe {
                     if sample_ref.is_null() {
                         return;
