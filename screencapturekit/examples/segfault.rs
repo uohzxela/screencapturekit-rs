@@ -487,7 +487,7 @@ fn main() {
         wparams.set_print_timestamps(false);
         wparams.set_translate(false);
         wparams.set_single_segment(true);
-        wparams.set_max_tokens(0);
+        wparams.set_max_tokens(64);
         wparams.set_language(Some("en"));
         wparams.set_n_threads(8);
         wparams.set_audio_ctx(0);
@@ -643,7 +643,6 @@ fn main() {
         }
 
         io::stdout().flush().unwrap();
-
     }
     println!("Got it! Exiting...");
 }
