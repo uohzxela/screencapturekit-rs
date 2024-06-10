@@ -1,8 +1,10 @@
+use core::num;
 use std::{cmp::min, fs::File, io::{self, BufWriter, Write}, path::PathBuf, sync::{atomic::{AtomicBool, Ordering}, Arc, Mutex}, thread::{self, sleep}, time::{self, Duration, Instant}};
 
 use console::Term;
+use cpal::{traits::{HostTrait, StreamTrait}, FromSample, Sample, StreamConfig};
 use hound::{WavSpec, WavWriter};
-use rodio::{buffer::SamplesBuffer, OutputStream, OutputStreamHandle, Source};
+use rodio::{buffer::SamplesBuffer, DeviceTrait, OutputStream, OutputStreamHandle, Source};
 use screencapturekit::{
     cm_sample_buffer::CMSampleBuffer,
     sc_content_filter::{InitParams, SCContentFilter},
@@ -65,6 +67,54 @@ impl StreamOutput for CapturerWrapper {
         let duration = start_time.elapsed();
         // println!("Execution time: {:?}", duration);
     }
+}
+
+struct AudioAsyncMic {
+
+}
+
+impl AudioAsyncMic {
+    fn new() {
+        let host = cpal::default_host();
+
+        let device = host.default_input_device().expect("failed to find input device");
+
+        println!("Input device: {}", device.name().expect("failed to find input device name"));
+
+        let config = device
+            .default_input_config()
+            .expect("Failed to get default input config");
+
+        let err_fn = move |err| {
+            eprintln!("an error occurred on stream: {}", err);
+        };
+
+        println!("Input config: {:?}", config);
+
+        let stream = device.build_input_stream(
+            &config.into(),
+            move |data, _: &_| {
+                println!("hello");
+                write_input_data(data)
+            },
+            err_fn,
+            None
+        ).expect("Failed to build input stream");
+
+        stream.play().expect("Failed to play stream");
+
+        std::thread::sleep(std::time::Duration::from_secs(3));
+        // drop(stream);
+    }
+
+    fn new2() {
+        let sdl_context = sdl2::init().unwrap();
+    }
+}
+
+fn write_input_data(input: &[f32])
+{
+    println!("samples from cpal: {:?}", input.len());
 }
 
 struct AudioAsyncNew {
@@ -262,7 +312,8 @@ impl StreamOutput for Capturer {
         for buf in buffers.iter() {
             // println!("number of channels: {}, data len: {:?}", buf.number_channels, buf.data.len());
             let samples: Vec<f32> = u8_to_pcmf32(&buf.data);
-            // self.tx.send(samples);
+            // println!("samples count: {}", samples.len());
+            // self.tx.send(samples.clone()).unwrap();
             for sample in samples {
                 self.queue.try_enqueue([sample]).unwrap();
             }
@@ -285,6 +336,7 @@ fn u8_to_pcmf32(data: &Vec<u8>) -> Vec<f32> {
     assert!(data.len() % 4 == 0, "Data length must be a multiple of 4.");
 
     // Convert chunks of 4 bytes into f32
+    // Replace with: https://github.com/ardaku/fon/blob/stable/examples/mix.rs#L81
     let pcmf32: Vec<f32> = data
         .chunks_exact(4)
         .map(|chunk| {
@@ -304,8 +356,10 @@ fn f32_to_i16(sample: f32) -> i16 {
 const WHISPER_SAMPLE_RATE: i32 = 16_000;
 
 fn main() {
+    AudioAsyncMic::new2();
+
     /* When more than this amount of audio received, run an iteration. */
-    const trigger_ms: i32 = 400;
+    const trigger_ms: i32 = 200;
     const n_samples_trigger: i32 = ((trigger_ms as f32 / 1000.0) * WHISPER_SAMPLE_RATE as f32) as i32;
 
     /**
@@ -315,7 +369,7 @@ fn main() {
      */
     // This is recommended to be smaller than the time wparams.audio_ctx
     // represents so an iteration can fit in one chunk.
-    const iter_threshold_ms: i32 = trigger_ms * 20;
+    const iter_threshold_ms: i32 = trigger_ms * 40;
     const n_samples_iter_threshold: i32 = ((iter_threshold_ms as f32 / 1000.0) * WHISPER_SAMPLE_RATE as f32) as i32;
 
     /* VAD parameters */
@@ -329,6 +383,7 @@ fn main() {
     // transcription at begin/end.
     const n_samples_keep_iter: i32 = (WHISPER_SAMPLE_RATE as f32 * 0.5) as i32;
     const vad_thold: f32 = 0.3;
+    const freq_thold: f32 = 200.0;
 
     let audio = AudioAsyncNew::new(16_000, 1);
     audio.start();
@@ -336,6 +391,7 @@ fn main() {
     // Whisper init
     let mut whisper_ctx_params = WhisperContextParameters::default();
     whisper_ctx_params.use_gpu(true);
+    whisper_ctx_params.flash_attn(true);
 
     let whisper_ctx = WhisperContext::new_with_params(
 		"/Users/jiaalex/Whisper/whisper.cpp/models/ggml-small.en.bin",
@@ -358,16 +414,12 @@ fn main() {
 
     let mut term = Term::stdout();
 
-    let mut prev_num_segments: Option<i32> = None;
+    let mut prev_num_segments: i32 = 0;
+    let mut prev_seg_len: i32 = 0;
 
     while running.load(Ordering::SeqCst) {
         let start_time = Instant::now();
         loop {
-            let start_time = Instant::now();
-            let queue = &audio.capturer.lock().unwrap().queue;
-            let duration = start_time.elapsed();
-            // println!("Execution time of lock acquisition: {:?}", duration);
-
             // while let Ok(mut samples) = audio.try_recv() {
             //     pcmf32_new.append(&mut samples);
             //     // if pcmf32_new.len() as i32 > n_samples_trigger {
@@ -385,6 +437,11 @@ fn main() {
             // if pcmf32_new.len() as i32 > n_samples_trigger {
             //     break;
             // }
+
+            let start_time = Instant::now();
+            let queue = &audio.capturer.lock().unwrap().queue;
+            let duration = start_time.elapsed();
+            // println!("Execution time of lock acquisition: {:?}", duration);
 
             if queue.len() as i32 > n_samples_iter_threshold {
                 println!("WARNING: cannot process audio fast enough, dropping audio ...");
@@ -409,7 +466,7 @@ fn main() {
             // sleep(Duration::from_millis(10));
         }
         let duration_spinloop = start_time.elapsed();
-        // println!("Execution time of spinloop: {:?}", duration);
+        // println!("Execution time of spinloop: {:?}", duration_spinloop);
         // println!("callback count: {}", audio.capturer.lock().unwrap().callback_count);
         audio.capturer.lock().unwrap().callback_count = 0;
 
@@ -421,19 +478,24 @@ fn main() {
             pcmf32.append(&mut vec![0.0 as f32; WHISPER_SAMPLE_RATE as usize - pcmf32.len() + 1600])
         }
 
-        let mut wparams = FullParams::new(SamplingStrategy::Greedy { best_of: 1 });
+        // let mut wparams = FullParams::new(SamplingStrategy::BeamSearch { beam_size: 5, patience: 0.0 });
+        let mut wparams = FullParams::new(SamplingStrategy::Greedy { best_of: 2 });
         wparams.set_print_progress(false);
         wparams.set_print_special(false);
         wparams.set_print_realtime(false);
         wparams.set_print_timestamps(false);
         wparams.set_translate(false);
         wparams.set_single_segment(false);
-        wparams.set_max_tokens(64);
+        wparams.set_max_tokens(32);
         wparams.set_language(Some("en"));
         wparams.set_n_threads(8);
         wparams.set_audio_ctx(0);
         wparams.set_tdrz_enable(false);
         wparams.set_temperature_inc(0.0);
+        // wparams.set_logprob_thold(-10.0);
+        // wparams.set_max_len(10);
+        // wparams.set_no_speech_thold(0.2);
+        // wparams.set_suppress_blank(false);
 
         let start_time = Instant::now();
 
@@ -442,13 +504,13 @@ fn main() {
         // continue;
 
         // now we can run the model
-        let data = &pcmf32[..];
+        let data = &pcmf32.clone()[..];
         // println!("transcribing {} samples", data.len());
         state
             .full(wparams, data)
             .expect("failed to run model");
 
-        let duration = start_time.elapsed();
+        let duration_full = start_time.elapsed();
         // println!("Execution time of full_whisper: {:?}", duration);
 
         // let mut stdout = std::io::stdout().into_raw_mode().unwrap();
@@ -460,16 +522,41 @@ fn main() {
 
         //     }
         // }
-
+        // let color: impl Fn(i32) -> termion::color::Fg<U : termion::color::Color> = |i: i32| {
+        //     match i {
+        //         0 => termion::color::Fg(termion::color::LightCyan),
+        //         1 => termion::color::Fg(termion::color::LightGreen),
+        //         2 => termion::color::LightMagenta,
+        //         3 => termion::color::LightYellow,
+        //     }
+        // };
         // fetch the results
         let num_segments = state
             .full_n_segments()
             .expect("failed to get number of segments");
-        prev_num_segments = Some(num_segments);
+
+        // let mut segment_len = 0;
+        // for i in 0..num_segments {
+        //     segment_len += state.full_get_segment_text(i).unwrap().len() as i32;
+        // }
+
+        // if segment_len < prev_seg_len {
+        //     continue;
+        // }
+        // prev_seg_len = segment_len;
+
+        if num_segments == 1 && num_segments < prev_num_segments {
+            // println!("num_segments < prev_num_segments");
+            // write!(term, "curr: {}, prev: {}, {:?}", num_segments, prev_num_segments, duration_full).unwrap();
+
+            continue;
+        }
+        prev_num_segments = num_segments;
         if num_segments > 0 {
             term.clear_line().unwrap();
         } else {
-            panic!("no segment")
+            // panic!("no segment")
+            continue;
         }
         for i in 0..num_segments {
             let segment = state
@@ -478,7 +565,24 @@ fn main() {
             if segment.len() == 0 {
                 panic!("empty segment")
             }
+            // let num_tokens = state.full_n_tokens(i).unwrap();
+            // for j in 0..num_tokens {
+            //     let prob = state.full_get_token_prob(i, j).unwrap();
+            //     println!("prob: {}", prob);
+            // }
+
+            // match i {
+            //     0 => term.write_fmt(format_args!("{}{}", segment, termion::color::Fg(termion::color::Green))).unwrap(),
+            //     1 => term.write_fmt(format_args!("{}{}", segment, termion::color::Fg(termion::color::Cyan))).unwrap(),
+            //     2 => term.write_fmt(format_args!("{}{}", segment, termion::color::Fg(termion::color::Yellow))).unwrap(),
+            //     3 => term.write_fmt(format_args!("{}{}", segment, termion::color::Fg(termion::color::Magenta))).unwrap(),
+            //     _ => term.write_fmt(format_args!("{}{}", segment, termion::color::Fg(termion::color::Green))).unwrap()
+            // }
+
+            // term.write_fmt(format_args!("[{}]{}", i, segment)).unwrap();
+
             term.write_fmt(format_args!("{}", segment)).unwrap();
+
 
             io::stdout().flush().unwrap();
 
@@ -491,9 +595,34 @@ fn main() {
             // println!("[{} - {}]: {}", start_timestamp, end_timestamp, segment);
         }
 
-        if pcmf32.len() as i32 > n_samples_iter_threshold {
-            pcmf32.clear();
+        let mut speech_has_end = false;
+
+        /* Need enough accumulated audio to do VAD. */
+        if pcmf32.len() >= n_samples_vad_window as usize {
+            let pcmf32_window: Vec<f32> = pcmf32[pcmf32.len() - (n_samples_vad_window as usize)..].to_vec();
+
+            let start = Instant::now();
+            speech_has_end = vad_simple(&mut pcmf32_window.clone(), WHISPER_SAMPLE_RATE, vad_last_ms, vad_thold, freq_thold, false);
+            let elapsed = start.elapsed();
+
+            // println!("Execution time of vad_simple: {:.3} ms", elapsed.as_secs_f64() * 1000.0);
+
+            if speech_has_end {
+                // println!("\nspeech end detected\n");
+            }
+        }
+
+        if pcmf32.len() as i32 > n_samples_iter_threshold || speech_has_end {
+            // pcmf32.clear();
+            prev_num_segments = 0;
+            prev_seg_len = 0;
+            // write!(term, " ({:?})", duration_spinloop).unwrap();
+            // write!(term, " ({:?})", num_segments).unwrap();
             write!(term, "\n").unwrap();
+
+            let index: i32 = pcmf32.len() as i32 - n_samples_keep_iter;
+            let last: Vec<f32> = pcmf32[index as usize..].to_vec();
+            pcmf32 = last;
         }
 
         io::stdout().flush().unwrap();
@@ -502,6 +631,56 @@ fn main() {
     println!("Got it! Exiting...");
 }
 
+fn high_pass_filter(data: &mut [f32], cutoff: f32, sample_rate: f32) {
+    const PI: f32 = std::f32::consts::PI;
+    let rc = 1.0 / (2.0 * PI * cutoff);
+    let dt = 1.0 / sample_rate;
+    let alpha = dt / (rc + dt);
+
+    let mut y = data[0];
+
+    for i in 1..data.len() {
+        y = alpha * (y + data[i] - data[i - 1]);
+        data[i] = y;
+    }
+}
+
+fn vad_simple(pcmf32: &mut [f32], sample_rate: i32, last_ms: i32, vad_thold: f32, freq_thold: f32, verbose: bool) -> bool {
+    let n_samples = pcmf32.len();
+    let n_samples_last = (sample_rate * last_ms) as usize / 1000;
+
+    if n_samples_last >= n_samples {
+        // not enough samples - assume no speech
+        return false;
+    }
+
+    if freq_thold > 0.0 {
+        high_pass_filter(pcmf32, freq_thold, sample_rate as f32);
+    }
+
+    let mut energy_all = 0.0;
+    let mut energy_last = 0.0;
+
+    for (i, &sample) in pcmf32.iter().enumerate() {
+        energy_all += sample.abs();
+
+        if i >= n_samples - n_samples_last {
+            energy_last += sample.abs();
+        }
+    }
+
+    energy_all /= n_samples as f32;
+    energy_last /= n_samples_last as f32;
+
+    if verbose {
+        eprintln!(
+            "vad_simple: energy_all: {}, energy_last: {}, vad_thold: {}, freq_thold: {}",
+            energy_all, energy_last, vad_thold, freq_thold
+        );
+    }
+
+    energy_last <= vad_thold * energy_all
+}
 
 fn main2() {
     println!("Starting");
