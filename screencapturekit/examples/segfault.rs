@@ -359,7 +359,7 @@ fn main() {
     AudioAsyncMic::new2();
 
     /* When more than this amount of audio received, run an iteration. */
-    const trigger_ms: i32 = 200;
+    const trigger_ms: i32 = 400;
     const n_samples_trigger: i32 = ((trigger_ms as f32 / 1000.0) * WHISPER_SAMPLE_RATE as f32) as i32;
 
     /**
@@ -369,7 +369,7 @@ fn main() {
      */
     // This is recommended to be smaller than the time wparams.audio_ctx
     // represents so an iteration can fit in one chunk.
-    const iter_threshold_ms: i32 = trigger_ms * 40;
+    const iter_threshold_ms: i32 = trigger_ms * 20;
     const n_samples_iter_threshold: i32 = ((iter_threshold_ms as f32 / 1000.0) * WHISPER_SAMPLE_RATE as f32) as i32;
 
     /* VAD parameters */
@@ -416,6 +416,7 @@ fn main() {
 
     let mut prev_num_segments: i32 = 0;
     let mut prev_seg_len: i32 = 0;
+    let mut prev_n_tokens = 0;
 
     while running.load(Ordering::SeqCst) {
         let start_time = Instant::now();
@@ -479,19 +480,20 @@ fn main() {
         }
 
         // let mut wparams = FullParams::new(SamplingStrategy::BeamSearch { beam_size: 5, patience: 0.0 });
-        let mut wparams = FullParams::new(SamplingStrategy::Greedy { best_of: 2 });
+        let mut wparams = FullParams::new(SamplingStrategy::Greedy { best_of: 1 });
         wparams.set_print_progress(false);
         wparams.set_print_special(false);
         wparams.set_print_realtime(false);
         wparams.set_print_timestamps(false);
         wparams.set_translate(false);
-        wparams.set_single_segment(false);
-        wparams.set_max_tokens(32);
+        wparams.set_single_segment(true);
+        wparams.set_max_tokens(0);
         wparams.set_language(Some("en"));
         wparams.set_n_threads(8);
         wparams.set_audio_ctx(0);
         wparams.set_tdrz_enable(false);
         wparams.set_temperature_inc(0.0);
+        wparams.set_no_timestamps(true);
         // wparams.set_logprob_thold(-10.0);
         // wparams.set_max_len(10);
         // wparams.set_no_speech_thold(0.2);
@@ -536,9 +538,21 @@ fn main() {
             .expect("failed to get number of segments");
 
         // let mut segment_len = 0;
+        // let mut n_tokens = 0;
         // for i in 0..num_segments {
         //     segment_len += state.full_get_segment_text(i).unwrap().len() as i32;
+        //     n_tokens += state.full_n_tokens(i).unwrap();
+
         // }
+
+        // if n_tokens < prev_n_tokens {
+        //     continue;
+        // }
+
+        // if (n_tokens - prev_n_tokens) < 20 {
+        //     prev_n_tokens = n_tokens;
+        // }
+
 
         // if segment_len < prev_seg_len {
         //     continue;
@@ -549,7 +563,7 @@ fn main() {
             // println!("num_segments < prev_num_segments");
             // write!(term, "curr: {}, prev: {}, {:?}", num_segments, prev_num_segments, duration_full).unwrap();
 
-            continue;
+            // continue;
         }
         prev_num_segments = num_segments;
         if num_segments > 0 {
@@ -558,6 +572,7 @@ fn main() {
             // panic!("no segment")
             continue;
         }
+
         for i in 0..num_segments {
             let segment = state
                 .full_get_segment_text(i)
@@ -616,8 +631,10 @@ fn main() {
             // pcmf32.clear();
             prev_num_segments = 0;
             prev_seg_len = 0;
+            prev_n_tokens = 0;
             // write!(term, " ({:?})", duration_spinloop).unwrap();
             // write!(term, " ({:?})", num_segments).unwrap();
+            // write!(term, " ({:?})", n_tokens).unwrap();
             write!(term, "\n").unwrap();
 
             let index: i32 = pcmf32.len() as i32 - n_samples_keep_iter;
