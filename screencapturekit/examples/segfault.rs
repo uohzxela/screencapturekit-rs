@@ -537,20 +537,24 @@ fn main() {
             .full_n_segments()
             .expect("failed to get number of segments");
 
-        // let mut segment_len = 0;
-        // let mut n_tokens = 0;
-        // for i in 0..num_segments {
-        //     segment_len += state.full_get_segment_text(i).unwrap().len() as i32;
-        //     n_tokens += state.full_n_tokens(i).unwrap();
+        let mut segment_len = 0;
+        let mut n_tokens = 0;
+        for i in 0..num_segments {
+            segment_len += state.full_get_segment_text(i).unwrap().len() as i32;
+            n_tokens += state.full_n_tokens(i).unwrap();
 
-        // }
+        }
+
+        prev_n_tokens = n_tokens;
 
         // if n_tokens < prev_n_tokens {
         //     continue;
         // }
 
-        // if (n_tokens - prev_n_tokens) < 20 {
+        // if (n_tokens - prev_n_tokens) < 32 && (n_tokens - prev_n_tokens) > 0 {
         //     prev_n_tokens = n_tokens;
+        // } else {
+        //     continue;
         // }
 
 
@@ -628,6 +632,10 @@ fn main() {
         }
 
         if pcmf32.len() as i32 > n_samples_iter_threshold || speech_has_end {
+            // Don't terminate current line if curr n_tokens below a certain threshold
+            if segment_len < 10 {
+                continue;
+            }
             // pcmf32.clear();
             prev_num_segments = 0;
             prev_seg_len = 0;
