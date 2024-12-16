@@ -53,6 +53,10 @@ impl SCStreamConfiguration {
     pub fn get_sample_rate(&self) -> u32 {
         get_property(self, sel!(sampleRate))
     }
+    pub fn set_capture_microphone(mut self, capture_microphone: bool) -> Result<Self, CFError> {
+        set_property(&mut self, sel!(setCaptureMicrophone:), capture_microphone)?;
+        Ok(self)
+    }
 }
 
 

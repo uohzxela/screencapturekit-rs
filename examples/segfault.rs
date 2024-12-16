@@ -139,6 +139,7 @@ impl AudioAsyncNew {
             .set_captures_audio(true).unwrap()
             .set_sample_rate(sample_rate).unwrap()
             .set_channel_count(channel_count as u8).unwrap();
+            // .set_capture_microphone(true).unwrap();
 
         let display = SCShareableContent::get().unwrap().displays().remove(0);
         let filter = SCContentFilter::new().with_display_excluding_windows(&display, &[]);
@@ -386,8 +387,8 @@ fn main() {
 
     let whisper_ctx = WhisperContext::new_with_params(
 		// "/Users/jiaalex/Whisper/whisper.cpp/models/ggml-large-v3-turbo-q5_0.bin",
-        "/Users/jiaalex/Whisper/whisper.cpp/models/ggml-medium.en.bin",
-        // "/Users/jiaalex/Whisper/whisper.cpp/models/ggml-small.en.bin",
+        // "/Users/jiaalex/Whisper/whisper.cpp/models/ggml-medium.en.bin",
+        "/Users/jiaalex/Whisper/whisper.cpp/models/ggml-small.en.bin",
 		whisper_ctx_params
 	).expect("failed to load model");
 
@@ -472,27 +473,25 @@ fn main() {
             pcmf32.append(&mut vec![0.0 as f32; WHISPER_SAMPLE_RATE as usize - pcmf32.len() + 1600])
         }
 
-        // let mut wparams = FullParams::new(SamplingStrategy::BeamSearch { beam_size: 5, patience: 0.0 });
-        let mut wparams = FullParams::new(SamplingStrategy::Greedy { best_of: 1 });
+        let mut wparams = FullParams::new(SamplingStrategy::BeamSearch { beam_size: 5, patience: 1.0 });
+        // let mut wparams = FullParams::new(SamplingStrategy::Greedy { best_of: 1 });
         wparams.set_print_progress(false);
         wparams.set_print_special(false);
         wparams.set_print_realtime(false);
         wparams.set_print_timestamps(false);
         wparams.set_translate(false);
-        wparams.set_single_segment(true);
+        wparams.set_single_segment(false);
         wparams.set_max_tokens(64);
         wparams.set_language(Some("en"));
         wparams.set_n_threads(8);
         wparams.set_audio_ctx(0);
         wparams.set_tdrz_enable(false);
         wparams.set_temperature_inc(0.0);
-        wparams.set_no_timestamps(true);
+        wparams.set_no_timestamps(false);
         // wparams.set_logprob_thold(-10.0);
         // wparams.set_max_len(10);
-        // wparams.set_no_speech_thold(0.2);
-        // wparams.set_suppress_blank(false);
-
-        let start_time = Instant::now();
+        // wparams.set_no_speech_thold(0.5);
+        // wparams.set_suppress_blank(true);
 
         // sleep(Duration::from_secs(2));
 
@@ -504,9 +503,8 @@ fn main() {
         state
             .full(wparams, data)
             .expect("failed to run model");
-
         let duration_full = start_time.elapsed();
-        // println!("Execution time of full_whisper: {:?}", duration);
+        // println!("Execution time of full_whisper: {:?}", duration_full);
 
         // let mut stdout = std::io::stdout().into_raw_mode().unwrap();
         // let (row, col) = stdout.cursor_pos().unwrap();

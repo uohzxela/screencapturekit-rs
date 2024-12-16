@@ -6,6 +6,7 @@ use std::fmt::{self, Display};
 pub enum SCStreamOutputType {
     Screen,
     Audio,
+    Microphone
 }
 unsafe impl objc::Encode for SCStreamOutputType {
     fn encode() -> objc::Encoding {
@@ -17,6 +18,7 @@ impl Display for SCStreamOutputType {
         match self {
             Self::Screen => write!(f, "Screen"),
             Self::Audio => write!(f, "Audio"),
+            Self::Microphone => write!(f, "Microphone"),
         }
     }
 }

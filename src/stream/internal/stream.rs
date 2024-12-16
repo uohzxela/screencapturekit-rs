@@ -114,6 +114,9 @@ impl SCStream {
                 SCStreamOutputType::Audio => {
                     msg_send![self.as_CFTypeRef().cast::<Object>(), addStreamOutput: handler type: SCStreamOutputType::Audio sampleHandlerQueue: queue error: error]
                 }
+                SCStreamOutputType::Microphone => {
+                    msg_send![self.as_CFTypeRef().cast::<Object>(), addStreamOutput: handler type: SCStreamOutputType::Microphone sampleHandlerQueue: queue error: error]
+                }
             };
 
             self.store_cleanup(handler);
