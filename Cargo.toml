@@ -47,3 +47,4 @@ swap-buffer-queue = "0.2.0"
 termion = "4.0.0"
 whisper-rs = { git = "https://github.com/hlhr202/whisper-rs.git", branch = "feature/fix-metal", features = ["metal"] }
 rubato = "0.16.1"
+anyhow = "1.0.94"

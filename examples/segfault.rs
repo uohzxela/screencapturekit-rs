@@ -1,12 +1,12 @@
 use core::num;
-use std::{cmp::min, fs::File, io::{self, BufWriter, Write}, path::PathBuf, sync::{atomic::{AtomicBool, Ordering}, mpsc::{self, SyncSender}, Arc, Mutex}, thread::{self, sleep, JoinHandle}, time::{self, Duration, Instant}};
+use std::{cmp::min, fs::File, io::{self, BufReader, BufWriter, Write}, path::PathBuf, sync::{atomic::{AtomicBool, Ordering}, mpsc::{self, SyncSender}, Arc, Mutex}, thread::{self, sleep, JoinHandle}, time::{self, Duration, Instant}};
 
 use console::Term;
 use cpal::{traits::{HostTrait, StreamTrait}, BufferSize, FromSample, Sample, Stream, StreamConfig};
 use hound::{WavSpec, WavWriter};
 use rodio::{buffer::SamplesBuffer, DeviceTrait, OutputStream, OutputStreamHandle, Source};
 use rubato::{Resampler, SincFixedIn, SincInterpolationParameters, SincInterpolationType};
-use swap_buffer_queue::{buffer::VecBuffer, Queue};
+use swap_buffer_queue::{buffer::{BufferSlice, VecBuffer}, error::TryDequeueError, Queue};
 use termion::{cursor::DetectCursorPos, raw::IntoRawMode};
 use whisper_rs::{FullParams, SamplingStrategy, WhisperContext, WhisperContextParameters};
 use once_cell::sync::Lazy;
@@ -79,7 +79,7 @@ impl SCStreamOutputTrait for CapturerWrapper {
 }
 
 struct AudioAsyncMic {
-    queue: Arc<Mutex<Vec<f32>>>,
+    queue: Arc<Queue<VecBuffer<f32>>>,
     processing_handle: Option<JoinHandle<()>>,
     stream: Option<Stream>,
     tx: Option<SyncSender<Vec<f32>>>,
@@ -117,8 +117,8 @@ impl AudioAsyncMic {
         };
 
         // Create an Arc<Mutex<Vec<f32>>> to safely share audio data across threads
-        let audio_buffer = Arc::new(Mutex::new(Vec::new()));
-        let audio_buffer_clone = Arc::clone(&audio_buffer);
+        let audio_buffer = Arc::new(Queue::with_capacity(16_000 * 100));
+        let audio_buffer_clone = audio_buffer.clone();
 
         // Create a channel to send captured audio for processing.
         let (tx, rx) = mpsc::sync_channel::<Vec<f32>>(10);
@@ -200,13 +200,21 @@ impl AudioAsyncMic {
             handle.join().unwrap();
         }
     }
+
+    fn get_queue_len(&self) -> usize {
+        self.queue.len()
+    }
+
+    fn drain_queue(&self) -> Result<Vec<f32>, anyhow::Error> {
+        Ok(self.queue.try_dequeue()?.to_vec())
+    }
 }
 
 /// Process audio chunk and store it in a shared buffer
-fn process_audio(audio_chunk: &[f32], audio_buffer: &Arc<Mutex<Vec<f32>>>) {
-    // Acquire the lock and append the chunk to the global buffer
-    let mut buffer = audio_buffer.lock().unwrap();
-    buffer.extend_from_slice(audio_chunk);
+fn process_audio(audio_chunk: &[f32], audio_buffer: &Arc<Queue<VecBuffer<f32>>>) {
+    for chunk in audio_chunk.to_vec() {
+        audio_buffer.try_enqueue([chunk]);
+    }
 }
 
 struct AudioAsyncNew {
@@ -267,6 +275,14 @@ impl AudioAsyncNew {
 
     fn stop(&self) {
         self.stream.stop_capture().unwrap();
+    }
+
+    fn get_queue_len(&self) -> usize {
+        self.capturer.lock().unwrap().queue.len()
+    }
+
+    fn drain_queue(&self) -> Result<Vec<f32>, anyhow::Error> {
+        Ok(self.capturer.lock().unwrap().queue.try_dequeue()?.to_vec())
     }
 }
 
@@ -459,7 +475,8 @@ fn main() {
     const vad_thold: f32 = 0.3;
     const freq_thold: f32 = 200.0;
 
-    let audio = AudioAsyncNew::new(16_000, 1);
+    // let audio = AudioAsyncNew::new(16_000, 1);
+    let mut audio = AudioAsyncMic::new().unwrap();
     audio.start();
 
     // Whisper init
@@ -516,19 +533,21 @@ fn main() {
             // }
 
             let start_time = Instant::now();
-            let queue = &audio.capturer.lock().unwrap().queue;
+            let queue_len = audio.get_queue_len();
+
+            // let queue = &mut audio.queue;
             let duration = start_time.elapsed();
             // println!("Execution time of lock acquisition: {:?}", duration);
 
-            if queue.len() as i32 > n_samples_iter_threshold {
+            if queue_len as i32 > n_samples_iter_threshold {
                 println!("WARNING: cannot process audio fast enough, dropping audio ...");
                 // clear audio
-                drop(queue.try_dequeue().unwrap());
+                audio.drain_queue().unwrap();
                 continue;
             }
 
-            if queue.len() as i32 > n_samples_trigger {
-                if let Ok(buffer) = queue.try_dequeue() {
+            if queue_len as i32 > n_samples_trigger {
+                if let Ok(buffer) = audio.drain_queue() {
                     pcmf32_new.append(&mut buffer.to_vec());
                     break;
                 } else {
@@ -545,7 +564,7 @@ fn main() {
         let duration_spinloop = start_time.elapsed();
         // println!("Execution time of spinloop: {:?}", duration_spinloop);
         // println!("callback count: {}", audio.capturer.lock().unwrap().callback_count);
-        audio.capturer.lock().unwrap().callback_count = 0;
+        // audio.capturer.lock().unwrap().callback_count = 0;
 
         // println!("[main] thread id: {:?}", std::thread::current().id());
 
