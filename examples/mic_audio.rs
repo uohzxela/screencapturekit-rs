@@ -1,9 +1,11 @@
 use rodio::{Decoder, OutputStream, Source};
 use std::io::{self, Write};
 use std::sync::mpsc::{self, Sender};
+use std::sync::{Arc, Mutex};
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use cpal::{SampleRate, StreamConfig, BufferSize};
 use rubato::{Resampler, SincFixedIn, SincInterpolationParameters, SincInterpolationType};
+use hound;
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Use the default audio input device.
@@ -34,6 +36,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         sample_rate: actual_sample_rate, // Use the supported sample rate
         buffer_size: BufferSize::Default, // Default buffer size
     };
+
+    // Create an Arc<Mutex<Vec<f32>>> to safely share audio data across threads
+    let audio_buffer = Arc::new(Mutex::new(Vec::new()));
+    let audio_buffer_clone = Arc::clone(&audio_buffer);
 
     // Create a channel to send captured audio for processing.
     let (tx, rx) = mpsc::sync_channel::<Vec<f32>>(10);
@@ -78,7 +84,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         while let Ok(audio_chunk) = rx.recv() {
             if let Ok(resampled) = resampler.process(&[audio_chunk], None) {
                 for resampled_chunk in resampled {
-                    process_audio(&resampled_chunk);
+                    process_audio(&resampled_chunk, &audio_buffer_clone);
                 }
             } else {
                 eprintln!("Error during resampling.");
@@ -97,18 +103,38 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     drop(tx); // Closing the channel.
     processing_handle.join().unwrap();
 
+    // Write accumulated audio to WAV file
+    let audio_data = audio_buffer.lock().unwrap();
+    write_wav_file(&audio_data, 16000, 1)?; // 16 kHz, mono
+
     Ok(())
 }
 
-/// Dummy audio processing function.
-/// Replace this with your actual audio processing logic.
-fn process_audio(audio_chunk: &[f32]) {
-    println!("Processing resampled audio chunk of size: {}", audio_chunk.len());
+/// Process audio chunk and store it in a shared buffer
+fn process_audio(audio_chunk: &[f32], audio_buffer: &Arc<Mutex<Vec<f32>>>) {
+    // Acquire the lock and append the chunk to the global buffer
+    let mut buffer = audio_buffer.lock().unwrap();
+    buffer.extend_from_slice(audio_chunk);
+}
 
-    // Example: Write audio data to a file or analyze it.
-    // For simplicity, just print the first few samples.
-    for sample in audio_chunk.iter().take(10) {
-        print!("{} ", sample);
+/// Write audio samples to a WAV file
+fn write_wav_file(samples: &[f32], sample_rate: u32, channels: u16) -> Result<(), hound::Error> {
+    // Create WAV writer with the given specifications
+    let spec = hound::WavSpec {
+        channels,
+        sample_rate,
+        bits_per_sample: 32,
+        sample_format: hound::SampleFormat::Float,
+    };
+
+    // Open a WAV file for writing
+    let mut writer = hound::WavWriter::create("recorded_audio.wav", spec)?;
+
+    // Write each sample to the WAV file
+    for &sample in samples {
+        writer.write_sample(sample)?;
     }
-    println!();
+
+    println!("Audio saved to recorded_audio.wav");
+    Ok(())
 }
