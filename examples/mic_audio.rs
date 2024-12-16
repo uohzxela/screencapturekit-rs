@@ -3,6 +3,7 @@ use std::io::{self, Write};
 use std::sync::mpsc::{self, Sender};
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use cpal::{SampleRate, StreamConfig, BufferSize};
+use rubato::{Resampler, SincFixedIn, SincInterpolationParameters, SincInterpolationType};
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Use the default audio input device.
@@ -58,8 +59,30 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // Spawn a thread to process audio chunks.
     let processing_handle = std::thread::spawn(move || {
+        // Set up the resampler.
+        let mut resampler = SincFixedIn::<f32>::new(
+            (16000.0 / actual_sample_rate.0 as f32).into(), // Ratio to convert to 16 kHz
+            2.0, // Latency
+            SincInterpolationParameters {
+                sinc_len: 256,
+                f_cutoff: 0.95,
+                interpolation: SincInterpolationType::Linear,
+                oversampling_factor: 128,
+                window: rubato::WindowFunction::Blackman,
+            },
+            512,
+            desired_config.channels as usize,
+        )
+        .expect("Failed to create resampler");
+
         while let Ok(audio_chunk) = rx.recv() {
-            process_audio(&audio_chunk);
+            if let Ok(resampled) = resampler.process(&[audio_chunk], None) {
+                for resampled_chunk in resampled {
+                    process_audio(&resampled_chunk);
+                }
+            } else {
+                eprintln!("Error during resampling.");
+            }
         }
     });
 
@@ -77,15 +100,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
-fn write_input_data(input: &[f32])
-{
-    println!("samples from cpal: {:?}", input.len());
-}
-
 /// Dummy audio processing function.
 /// Replace this with your actual audio processing logic.
 fn process_audio(audio_chunk: &[f32]) {
-    println!("Processing audio chunk of size: {}", audio_chunk.len());
+    println!("Processing resampled audio chunk of size: {}", audio_chunk.len());
 
     // Example: Write audio data to a file or analyze it.
     // For simplicity, just print the first few samples.
