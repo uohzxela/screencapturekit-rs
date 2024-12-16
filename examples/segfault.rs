@@ -1,10 +1,11 @@
 use core::num;
-use std::{cmp::min, fs::File, io::{self, BufWriter, Write}, path::PathBuf, sync::{atomic::{AtomicBool, Ordering}, Arc, Mutex}, thread::{self, sleep}, time::{self, Duration, Instant}};
+use std::{cmp::min, fs::File, io::{self, BufWriter, Write}, path::PathBuf, sync::{atomic::{AtomicBool, Ordering}, mpsc::{self, SyncSender}, Arc, Mutex}, thread::{self, sleep, JoinHandle}, time::{self, Duration, Instant}};
 
 use console::Term;
-use cpal::{traits::{HostTrait, StreamTrait}, FromSample, Sample, StreamConfig};
+use cpal::{traits::{HostTrait, StreamTrait}, BufferSize, FromSample, Sample, Stream, StreamConfig};
 use hound::{WavSpec, WavWriter};
 use rodio::{buffer::SamplesBuffer, DeviceTrait, OutputStream, OutputStreamHandle, Source};
+use rubato::{Resampler, SincFixedIn, SincInterpolationParameters, SincInterpolationType};
 use swap_buffer_queue::{buffer::VecBuffer, Queue};
 use termion::{cursor::DetectCursorPos, raw::IntoRawMode};
 use whisper_rs::{FullParams, SamplingStrategy, WhisperContext, WhisperContextParameters};
@@ -78,51 +79,134 @@ impl SCStreamOutputTrait for CapturerWrapper {
 }
 
 struct AudioAsyncMic {
-
+    queue: Arc<Mutex<Vec<f32>>>,
+    processing_handle: Option<JoinHandle<()>>,
+    stream: Option<Stream>,
+    tx: Option<SyncSender<Vec<f32>>>,
 }
 
 impl AudioAsyncMic {
-    fn new() {
+    fn new() -> Result<Self, Box<dyn std::error::Error>> {
+        // Use the default audio input device.
         let host = cpal::default_host();
+        let device = host.default_input_device().expect("No input device available");
+        println!("Using input device: {}", device.name()?);
 
-        let device = host.default_input_device().expect("failed to find input device");
+        // Query supported configurations.
+        let supported_configs = device
+            .supported_input_configs()
+            .expect("Failed to get supported input configurations");
 
-        println!("Input device: {}", device.name().expect("failed to find input device name"));
+        // Choose a compatible configuration.
+        let supported_config = supported_configs
+            .filter(|config| config.channels() == 1) // Prefer mono if available
+            .next()
+            .expect("No compatible configuration found");
 
-        let config = device
-            .default_input_config()
-            .expect("Failed to get default input config");
+        let actual_sample_rate = supported_config.min_sample_rate();
+        println!(
+            "Using sample rate: {} Hz and channels: {}",
+            actual_sample_rate.0,
+            supported_config.channels()
+        );
 
-        let err_fn = move |err| {
-            eprintln!("an error occurred on stream: {}", err);
+        let desired_config = StreamConfig {
+            channels: supported_config.channels(),
+            sample_rate: actual_sample_rate, // Use the supported sample rate
+            buffer_size: BufferSize::Default, // Default buffer size
         };
 
-        println!("Input config: {:?}", config);
+        // Create an Arc<Mutex<Vec<f32>>> to safely share audio data across threads
+        let audio_buffer = Arc::new(Mutex::new(Vec::new()));
+        let audio_buffer_clone = Arc::clone(&audio_buffer);
 
+        // Create a channel to send captured audio for processing.
+        let (tx, rx) = mpsc::sync_channel::<Vec<f32>>(10);
+
+        // Set up the input audio stream.
+        let tx_clone = tx.clone();
         let stream = device.build_input_stream(
-            &config.into(),
-            move |data, _: &_| {
-                println!("hello");
-                write_input_data(data)
+            &desired_config,
+            move |data: &[f32], _: &cpal::InputCallbackInfo| {
+                let audio_chunk = data.to_vec();
+                if tx_clone.send(audio_chunk).is_err() {
+                    eprintln!("Audio processing thread disconnected.");
+                }
             },
-            err_fn,
+            move |err| {
+                eprintln!("An error occurred on the input stream: {}", err);
+            },
             None
-        ).expect("Failed to build input stream");
+        )?;
 
-        stream.play().expect("Failed to play stream");
+        // Spawn a thread to process audio chunks.
+        let processing_handle = std::thread::spawn(move || {
+            // Set up the resampler.
+            let mut resampler = SincFixedIn::<f32>::new(
+                (16000.0 / actual_sample_rate.0 as f32).into(), // Ratio to convert to 16 kHz
+                2.0, // Latency
+                SincInterpolationParameters {
+                    sinc_len: 256,
+                    f_cutoff: 0.95,
+                    interpolation: SincInterpolationType::Linear,
+                    oversampling_factor: 128,
+                    window: rubato::WindowFunction::Blackman,
+                },
+                512,
+                desired_config.channels as usize,
+            )
+            .expect("Failed to create resampler");
 
-        std::thread::sleep(std::time::Duration::from_secs(3));
-        // drop(stream);
+            while let Ok(audio_chunk) = rx.recv() {
+                if let Ok(resampled) = resampler.process(&[audio_chunk], None) {
+                    for resampled_chunk in resampled {
+                        process_audio(&resampled_chunk, &audio_buffer_clone);
+                    }
+                } else {
+                    eprintln!("Error during resampling.");
+                }
+            }
+        });
+
+        Ok(AudioAsyncMic {
+            queue: audio_buffer,
+            processing_handle: Some(processing_handle),
+            stream: Some(stream),
+            tx: Some(tx),
+        })
     }
 
-    fn new2() {
-        let sdl_context = sdl2::init().unwrap();
+    fn start(&self) {
+        if let Some(ref stream) = self.stream {
+            stream.play().unwrap();
+        }
+    }
+
+    fn stop(&mut self) {
+        println!("Stopping audio stream...");
+
+        // Stop the stream
+        if let Some(stream) = self.stream.take() {
+            drop(stream); // Dropping the stream stops it.
+        }
+
+        // Close the channel
+        if let Some(tx) = self.tx.take() {
+            drop(tx); // Closing the channel.
+        }
+
+        // Join the processing thread
+        if let Some(handle) = self.processing_handle.take() {
+            handle.join().unwrap();
+        }
     }
 }
 
-fn write_input_data(input: &[f32])
-{
-    println!("samples from cpal: {:?}", input.len());
+/// Process audio chunk and store it in a shared buffer
+fn process_audio(audio_chunk: &[f32], audio_buffer: &Arc<Mutex<Vec<f32>>>) {
+    // Acquire the lock and append the chunk to the global buffer
+    let mut buffer = audio_buffer.lock().unwrap();
+    buffer.extend_from_slice(audio_chunk);
 }
 
 struct AudioAsyncNew {
@@ -348,8 +432,6 @@ fn f32_to_i16(sample: f32) -> i16 {
 const WHISPER_SAMPLE_RATE: i32 = 16_000;
 
 fn main() {
-    AudioAsyncMic::new2();
-
     /* When more than this amount of audio received, run an iteration. */
     const trigger_ms: i32 = 400;
     const n_samples_trigger: i32 = ((trigger_ms as f32 / 1000.0) * WHISPER_SAMPLE_RATE as f32) as i32;
@@ -643,6 +725,7 @@ fn main() {
 
         io::stdout().flush().unwrap();
     }
+    audio.stop();
     println!("Got it! Exiting...");
 }
 
