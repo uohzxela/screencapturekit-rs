@@ -21,6 +21,9 @@ use screencapturekit::{
         output_trait::SCStreamOutputTrait, output_type::SCStreamOutputType, SCStream,
     },
 };
+use clap::{Command, Arg};
+use std::process;
+
 
 // use std::{
 //     fs::OpenOptions,
@@ -78,6 +81,13 @@ impl SCStreamOutputTrait for CapturerWrapper {
     }
 }
 
+trait AudioSource {
+    fn start(&self) -> Result<(), anyhow::Error>;
+    fn stop(&mut self) -> Result<(), anyhow::Error>;
+    fn get_queue_len(&self) -> usize;
+    fn drain_queue(&self) -> Result<Vec<f32>, anyhow::Error>;
+}
+
 struct AudioAsyncMic {
     queue: Arc<Queue<VecBuffer<f32>>>,
     processing_handle: Option<JoinHandle<()>>,
@@ -86,7 +96,7 @@ struct AudioAsyncMic {
 }
 
 impl AudioAsyncMic {
-    fn new() -> Result<Self, Box<dyn std::error::Error>> {
+    fn new() -> Result<Self, anyhow::Error> {
         // Use the default audio input device.
         let host = cpal::default_host();
         let device = host.default_input_device().expect("No input device available");
@@ -175,14 +185,20 @@ impl AudioAsyncMic {
             tx: Some(tx),
         })
     }
+}
 
-    fn start(&self) {
+impl AudioSource for AudioAsyncMic {
+    fn start(&self) -> Result<(), anyhow::Error> {
         if let Some(ref stream) = self.stream {
-            stream.play().unwrap();
+            stream.play()?;
+        } else {
+            anyhow::bail!("No stream available");
         }
+
+        Ok(())
     }
 
-    fn stop(&mut self) {
+    fn stop(&mut self) -> Result<(), anyhow::Error> {
         println!("Stopping audio stream...");
 
         // Stop the stream
@@ -199,6 +215,8 @@ impl AudioAsyncMic {
         if let Some(handle) = self.processing_handle.take() {
             handle.join().unwrap();
         }
+
+        Ok(())
     }
 
     fn get_queue_len(&self) -> usize {
@@ -224,7 +242,10 @@ struct AudioAsyncNew {
 }
 
 impl AudioAsyncNew {
-    fn new(sample_rate: u32, channel_count: u32) -> AudioAsyncNew {
+    fn new() -> Result<AudioAsyncNew, anyhow::Error> {
+        let sample_rate = 16_000;
+        let channel_count = 1;
+
         let (tx, rx) = unbounded::<Vec<f32>>();
 
         let config = SCStreamConfiguration::new()
@@ -257,24 +278,30 @@ impl AudioAsyncNew {
 
         // stream.stop_capture().unwrap();
 
-        res
+        Ok(res)
 
     }
+}
 
+impl AudioSource for AudioAsyncNew {
     // fn get_queue(&self) -> &Queue<VecBuffer<f32>> {
     //     &self.capturer.lock().unwrap().queue
     // }
 
-    fn try_recv(&self) -> Result<Vec<f32>, crossbeam::channel::TryRecvError> {
-        self.rx.try_recv()
-    }
+    // fn try_recv(&self) -> Result<Vec<f32>, crossbeam::channel::TryRecvError> {
+    //     self.rx.try_recv()
+    // }
 
-    fn start(&self) {
+    fn start(&self) -> Result<(), anyhow::Error> {
         self.stream.start_capture().unwrap();
+
+        Ok(())
     }
 
-    fn stop(&self) {
+    fn stop(&mut self) -> Result<(), anyhow::Error> {
         self.stream.stop_capture().unwrap();
+
+        Ok(())
     }
 
     fn get_queue_len(&self) -> usize {
@@ -422,6 +449,42 @@ impl SCStreamOutputTrait for Capturer {
     }
 }
 
+enum AudioSourceEnum {
+    Mic(AudioAsyncMic),
+    New(AudioAsyncNew),
+}
+
+impl AudioSource for AudioSourceEnum {
+    fn start(&self) -> Result<(), anyhow::Error> {
+        match self {
+            AudioSourceEnum::Mic(mic) => mic.start(),
+            AudioSourceEnum::New(new) => new.start(),
+        }
+    }
+
+    fn stop(&mut self) -> Result<(), anyhow::Error> {
+        match self {
+            AudioSourceEnum::Mic(mic) => mic.stop(),
+            AudioSourceEnum::New(new) => new.stop(),
+        }
+    }
+
+    fn get_queue_len(&self) -> usize {
+        match self {
+            AudioSourceEnum::Mic(mic) => mic.get_queue_len(),
+            AudioSourceEnum::New(new) => new.get_queue_len(),
+        }
+    }
+
+    fn drain_queue(&self) -> Result<Vec<f32>, anyhow::Error> {
+        match self {
+            AudioSourceEnum::Mic(mic) => mic.drain_queue(),
+            AudioSourceEnum::New(new) => new.drain_queue(),
+        }
+    }
+}
+
+
 
 fn u8_to_pcmf32(data: &Vec<u8>) -> Vec<f32> {
     // Ensure the data length is a multiple of 4 since we're interpreting 4 bytes as one f32
@@ -475,8 +538,44 @@ fn main() {
     const vad_thold: f32 = 0.3;
     const freq_thold: f32 = 200.0;
 
+    // Parse CLI arguments using the modern `clap` API
+    let matches = Command::new("My Scribe")
+        .version("1.0")
+        .author("Alex Jiao <uohxzela@example.com>")
+        .about("Switch between microphone audio and system audio")
+        .arg(
+            Arg::new("source")
+                .long("source")
+                .short('s')
+                .required(true)
+                .value_parser(["mic", "sys"])
+                .help("Choose the audio source: 'mic' or 'sys'"),
+        )
+        .get_matches();
+
+    // Retrieve the value of the "source" argument
+    let source = matches
+        .get_one::<String>("source")
+        .expect("Argument 'source' is required").as_str();
+
+    // Initialize the appropriate audio source
+    let mut audio: AudioSourceEnum = match source {
+        "mic" => {
+            println!("Using microphone audio.");
+            AudioSourceEnum::Mic(AudioAsyncMic::new().expect("Failed to initialize microphone audio"))
+        }
+        "sys" => {
+            println!("Using system audio.");
+            AudioSourceEnum::New(AudioAsyncNew::new().expect("Failed to initialize system audio"))
+        }
+        _ => {
+            eprintln!("Invalid audio source specified.");
+            process::exit(1);
+        }
+    };
+
     // let audio = AudioAsyncNew::new(16_000, 1);
-    let mut audio = AudioAsyncMic::new().unwrap();
+    // let mut audio = AudioAsyncMic::new().unwrap();
     audio.start();
 
     // Whisper init
