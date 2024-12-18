@@ -534,15 +534,15 @@ fn main() {
 
     // Keep the last 0.5s of an iteration to the next one for better
     // transcription at begin/end.
-    const n_samples_keep_iter: i32 = (WHISPER_SAMPLE_RATE as f32 * 0.5) as i32;
-    const vad_thold: f32 = 0.3;
+    const n_samples_keep_iter: i32 = (WHISPER_SAMPLE_RATE as f32 * 2.0) as i32;
+    const vad_thold: f32 = 0.2;
     const freq_thold: f32 = 200.0;
 
     // Parse CLI arguments using the modern `clap` API
     let matches = Command::new("My Scribe")
         .version("1.0")
         .author("Alex Jiao <uohxzela@example.com>")
-        .about("Switch between microphone audio and system audio")
+        .about("Live, local, and private transcription")
         .arg(
             Arg::new("source")
                 .long("source")
@@ -585,7 +585,7 @@ fn main() {
 
     let whisper_ctx = WhisperContext::new_with_params(
 		// "/Users/jiaalex/Whisper/whisper.cpp/models/ggml-large-v3-turbo-q5_0.bin",
-        // "/Users/jiaalex/Whisper/whisper.cpp/models/ggml-medium.en.bin",
+        // "/Users/jiaalex/Whisper/whisper.cpp/models/ggml-medium.bin",
         "/Users/jiaalex/Whisper/whisper.cpp/models/ggml-small.en.bin",
 		whisper_ctx_params
 	).expect("failed to load model");
@@ -613,24 +613,6 @@ fn main() {
     while running.load(Ordering::SeqCst) {
         let start_time = Instant::now();
         loop {
-            // while let Ok(mut samples) = audio.try_recv() {
-            //     pcmf32_new.append(&mut samples);
-            //     // if pcmf32_new.len() as i32 > n_samples_trigger {
-            //     //     break;
-            //     // }
-            // }
-
-            // if pcmf32_new.len() as i32 > n_samples_iter_threshold {
-            //     println!("WARNING: cannot process audio fast enough, dropping audio ...");
-            //     // clear audio
-            //     pcmf32_new.clear();
-            //     continue;
-            // }
-
-            // if pcmf32_new.len() as i32 > n_samples_trigger {
-            //     break;
-            // }
-
             let start_time = Instant::now();
             let queue_len = audio.get_queue_len();
 
@@ -775,34 +757,11 @@ fn main() {
             if segment.len() == 0 {
                 panic!("empty segment")
             }
-            // let num_tokens = state.full_n_tokens(i).unwrap();
-            // for j in 0..num_tokens {
-            //     let prob = state.full_get_token_prob(i, j).unwrap();
-            //     println!("prob: {}", prob);
-            // }
-
-            // match i {
-            //     0 => term.write_fmt(format_args!("{}{}", segment, termion::color::Fg(termion::color::Green))).unwrap(),
-            //     1 => term.write_fmt(format_args!("{}{}", segment, termion::color::Fg(termion::color::Cyan))).unwrap(),
-            //     2 => term.write_fmt(format_args!("{}{}", segment, termion::color::Fg(termion::color::Yellow))).unwrap(),
-            //     3 => term.write_fmt(format_args!("{}{}", segment, termion::color::Fg(termion::color::Magenta))).unwrap(),
-            //     _ => term.write_fmt(format_args!("{}{}", segment, termion::color::Fg(termion::color::Green))).unwrap()
-            // }
-
-            // term.write_fmt(format_args!("[{}]{}", i, segment)).unwrap();
 
             term.write_fmt(format_args!("{}", segment)).unwrap();
 
 
             io::stdout().flush().unwrap();
-
-            // let start_timestamp = state
-            //     .full_get_segment_t0(i)
-            //     .expect("failed to get segment start timestamp");
-            // let end_timestamp = state
-            //     .full_get_segment_t1(i)
-            //     .expect("failed to get segment end timestamp");
-            // println!("[{} - {}]: {}", start_timestamp, end_timestamp, segment);
         }
 
         let mut speech_has_end = false;
@@ -827,24 +786,169 @@ fn main() {
             if segment_len < 15 {
                 continue;
             }
-            // pcmf32.clear();
             prev_num_segments = 0;
             prev_seg_len = 0;
             prev_n_tokens = 0;
-            // write!(term, " ({:?})", duration_spinloop).unwrap();
-            // write!(term, " ({:?})", num_segments).unwrap();
-            // write!(term, " ({:?})", n_tokens).unwrap();
             write!(term, "\n").unwrap();
 
             let index: i32 = pcmf32.len() as i32 - n_samples_keep_iter;
             let last: Vec<f32> = pcmf32[index as usize..].to_vec();
-            pcmf32 = last;
+            if speech_has_end {
+                pcmf32.clear();
+            } else {
+                pcmf32 = last;
+            }
+            // pcmf32 = last;
         }
 
         io::stdout().flush().unwrap();
     }
     audio.stop();
     println!("Got it! Exiting...");
+}
+
+use std::cmp;
+
+#[derive(Debug)]
+struct TranscriptionBuffer {
+    current_text: String,
+    prev_segment: String,
+}
+
+impl TranscriptionBuffer {
+    fn new() -> Self {
+        Self {
+            current_text: String::new(),
+            prev_segment: String::new(),
+        }
+    }
+
+    fn join_segments(&mut self, new_segment: &str) -> String {
+        if self.prev_segment.is_empty() {
+            self.prev_segment = new_segment.to_string();
+            return new_segment.to_string();
+        }
+
+        // Find the overlap point using sliding window and edit distance
+        let overlap_point = self.find_overlap_point(&self.prev_segment, new_segment);
+
+        if let Some((start_idx, _)) = overlap_point {
+            // Join segments at the found overlap point
+            let joined = format!("{}{}",
+                self.prev_segment,
+                &new_segment[start_idx..]
+            );
+            self.prev_segment = joined.clone();
+            joined
+        } else {
+            // If no overlap found, just append with a space
+            let joined = format!("{} {}", self.prev_segment, new_segment);
+            self.prev_segment = joined.clone();
+            joined
+        }
+    }
+
+    fn find_overlap_point(&self, prev: &str, current: &str) -> Option<(usize, f32)> {
+        let prev_words: Vec<&str> = prev.split_whitespace().collect();
+        let curr_words: Vec<&str> = current.split_whitespace().collect();
+
+        // Look for overlapping sequences
+        let min_overlap = 3; // Minimum words to consider as valid overlap
+        let max_overlap = cmp::min(prev_words.len(), curr_words.len());
+
+        let mut best_match: Option<(usize, f32)> = None;
+        let mut min_distance = f32::MAX;
+
+        for window_size in (min_overlap..=max_overlap).rev() {
+            for start_idx in 0..curr_words.len() - window_size + 1 {
+                if start_idx + window_size > curr_words.len() {
+                    continue;
+                }
+
+                let curr_window = &curr_words[start_idx..start_idx + window_size];
+
+                // Look for this window in the previous segment
+                for prev_start in 0..=prev_words.len() - window_size {
+                    let prev_window = &prev_words[prev_start..prev_start + window_size];
+
+                    let distance = self.compute_window_distance(prev_window, curr_window);
+
+                    // If we found a perfect match
+                    if distance == 0.0 {
+                        let char_pos = curr_words[..start_idx].iter()
+                            .map(|w| w.len() + 1)
+                            .sum();
+                        return Some((char_pos, 0.0));
+                    }
+
+                    // Keep track of best partial match
+                    if distance < min_distance {
+                        min_distance = distance;
+                        let char_pos = curr_words[..start_idx].iter()
+                            .map(|w| w.len() + 1)
+                            .sum();
+                        best_match = Some((char_pos, distance));
+                    }
+                }
+            }
+        }
+
+        // Return best match if it's good enough
+        if min_distance < 0.3 { // Threshold for acceptable partial matches
+            best_match
+        } else {
+            None
+        }
+    }
+
+    fn compute_window_distance(&self, window1: &[&str], window2: &[&str]) -> f32 {
+        if window1.len() != window2.len() {
+            return f32::MAX;
+        }
+
+        let total_words = window1.len();
+        let mut total_distance = 0.0;
+
+        for (w1, w2) in window1.iter().zip(window2.iter()) {
+            total_distance += self.levenshtein_distance(w1, w2) as f32;
+        }
+
+        total_distance / total_words as f32
+    }
+
+    fn levenshtein_distance(&self, s1: &str, s2: &str) -> usize {
+        let len1 = s1.chars().count();
+        let len2 = s2.chars().count();
+
+        if len1 == 0 { return len2; }
+        if len2 == 0 { return len1; }
+
+        let mut matrix = vec![vec![0; len2 + 1]; len1 + 1];
+
+        for i in 0..=len1 {
+            matrix[i][0] = i;
+        }
+        for j in 0..=len2 {
+            matrix[0][j] = j;
+        }
+
+        for (i, c1) in s1.chars().enumerate() {
+            for (j, c2) in s2.chars().enumerate() {
+                let substitution_cost = if c1 == c2 { 0 } else { 1 };
+                matrix[i + 1][j + 1] = [
+                    matrix[i][j + 1] + 1,                // deletion
+                    matrix[i + 1][j] + 1,                // insertion
+                    matrix[i][j] + substitution_cost,    // substitution
+                ].iter().min().unwrap().clone();
+            }
+        }
+
+        matrix[len1][len2]
+    }
+
+    fn clear_on_speech_end(&mut self) {
+        self.prev_segment.clear();
+    }
 }
 
 fn high_pass_filter(data: &mut [f32], cutoff: f32, sample_rate: f32) {
