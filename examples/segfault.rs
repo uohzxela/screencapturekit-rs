@@ -8,7 +8,7 @@ use rodio::{buffer::SamplesBuffer, DeviceTrait, OutputStream, OutputStreamHandle
 use rubato::{Resampler, SincFixedIn, SincInterpolationParameters, SincInterpolationType};
 use swap_buffer_queue::{buffer::{BufferSlice, VecBuffer}, error::TryDequeueError, Queue};
 use termion::{cursor::DetectCursorPos, raw::IntoRawMode};
-use whisper_rs::{FullParams, SamplingStrategy, WhisperContext, WhisperContextParameters};
+use whisper_rs::{DtwModelPreset, DtwParameters, FullParams, SamplingStrategy, WhisperContext, WhisperContextParameters};
 use once_cell::sync::Lazy;
 use crossbeam::channel::{unbounded, Receiver, Sender};
 
@@ -23,6 +23,8 @@ use screencapturekit::{
 };
 use clap::{Command, Arg};
 use std::process;
+
+//TODO: https://pytorch.org/audio/master/tutorials/forced_alignment_tutorial.html
 
 
 // use std::{
@@ -534,7 +536,7 @@ fn main() {
 
     // Keep the last 0.5s of an iteration to the next one for better
     // transcription at begin/end.
-    const n_samples_keep_iter: i32 = (WHISPER_SAMPLE_RATE as f32 * 2.0) as i32;
+    const n_samples_keep_iter: i32 = (WHISPER_SAMPLE_RATE as f32 * 1.5) as i32;
     const vad_thold: f32 = 0.2;
     const freq_thold: f32 = 200.0;
 
@@ -582,6 +584,13 @@ fn main() {
     let mut whisper_ctx_params = WhisperContextParameters::default();
     whisper_ctx_params.use_gpu(true);
     whisper_ctx_params.flash_attn(true);
+    // whisper_ctx_params.dtw_parameters(
+    //     DtwParameters {
+    //         mode: whisper_rs::DtwMode::ModelPreset { model_preset: DtwModelPreset::SmallEn },
+    //         ..Default::default()
+    //     }
+    // );
+    // whisper_ctx_params.dtw_parameters(true);
 
     let whisper_ctx = WhisperContext::new_with_params(
 		// "/Users/jiaalex/Whisper/whisper.cpp/models/ggml-large-v3-turbo-q5_0.bin",
@@ -663,13 +672,25 @@ fn main() {
         wparams.set_print_timestamps(false);
         wparams.set_translate(false);
         wparams.set_single_segment(false);
-        wparams.set_max_tokens(64);
+        // wparams.set_max_tokens(128);
+        // wparams.set_n_max_text_ctx(64);
+        // wparams.set_audio_ctx(audio_ctx);
+
         wparams.set_language(Some("en"));
         wparams.set_n_threads(8);
         wparams.set_audio_ctx(0);
         wparams.set_tdrz_enable(false);
         wparams.set_temperature_inc(0.0);
         wparams.set_no_timestamps(false);
+        // Remove Repetitions:
+        // https://github.com/ggerganov/whisper.cpp/issues/896#issuecomment-1569586018
+        // https://github.com/ggerganov/whisper.cpp/issues/471
+        wparams.set_entropy_thold(2.8);
+        // wparams.set_logprob_thold(-2.0);
+        // wparams.set_no_speech_thold(0.8);
+        // wparams.set_token_timestamps(true);
+        // wparams.set_split_on_word(true);
+        // wparams.set_max_len(1);
         // wparams.set_logprob_thold(-10.0);
         // wparams.set_max_len(10);
         // wparams.set_no_speech_thold(0.5);
@@ -754,9 +775,14 @@ fn main() {
             let segment = state
                 .full_get_segment_text(i)
                 .expect("failed to get segment");
-            if segment.len() == 0 {
-                panic!("empty segment")
-            }
+            // if segment.len() == 0 {
+            //     panic!("empty segment")
+            // }
+            // let num_tokens = state.full_n_tokens(i).unwrap();
+            // for j in 0..num_tokens {
+            //     let token = state.full_get_token_data(i, j).unwrap();
+            //     // println!("t0: {}, t1: {}, dtw: {}", token.t0, token.t1, token.t_dtw);
+            // }
 
             term.write_fmt(format_args!("{}", segment)).unwrap();
 
