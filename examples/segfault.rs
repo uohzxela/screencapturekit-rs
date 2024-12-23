@@ -537,7 +537,7 @@ fn main() {
     // Keep the last 0.5s of an iteration to the next one for better
     // transcription at begin/end.
     const n_samples_keep_iter: i32 = (WHISPER_SAMPLE_RATE as f32 * 1.5) as i32;
-    const vad_thold: f32 = 0.2;
+    const vad_thold: f32 = 0.1;
     const freq_thold: f32 = 200.0;
 
     // Parse CLI arguments using the modern `clap` API
@@ -618,6 +618,7 @@ fn main() {
     let mut prev_num_segments: i32 = 0;
     let mut prev_seg_len: i32 = 0;
     let mut prev_n_tokens = 0;
+    let mut retry_count = 0;
 
     while running.load(Ordering::SeqCst) {
         let start_time = Instant::now();
@@ -751,10 +752,13 @@ fn main() {
         //     continue;
         // }
 
+        if segment_len < prev_seg_len && retry_count < 5 {
+            retry_count += 1;
+            // Mostly likely endless repetition here
+            continue;
+        }
 
-        // if segment_len < prev_seg_len {
-        //     continue;
-        // }
+        retry_count = 0;
         prev_seg_len = segment_len;
 
         if num_segments == 1 && num_segments < prev_num_segments {
