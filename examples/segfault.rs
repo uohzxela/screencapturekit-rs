@@ -596,6 +596,7 @@ fn main() {
 		// "/Users/jiaalex/Whisper/whisper.cpp/models/ggml-large-v3-turbo-q5_0.bin",
         // "/Users/jiaalex/Whisper/whisper.cpp/models/ggml-medium.bin",
         "/Users/jiaalex/Whisper/whisper.cpp/models/ggml-small.en.bin",
+        // "/Users/jiaalex/Whisper/whisper.cpp/models/ggml-base.en.bin",
 		whisper_ctx_params
 	).expect("failed to load model");
 
@@ -642,7 +643,7 @@ fn main() {
                     pcmf32_new.append(&mut buffer.to_vec());
                     break;
                 } else {
-                    println!("alex");
+                    // println!("alex");
                     sleep(Duration::from_millis(1));
                     continue;
                 }
@@ -673,7 +674,8 @@ fn main() {
         wparams.set_print_timestamps(false);
         wparams.set_translate(false);
         wparams.set_single_segment(false);
-        // wparams.set_max_tokens(128);
+        wparams.set_max_tokens(100);
+        // wparams.set_no_context(true);
         // wparams.set_n_max_text_ctx(64);
         // wparams.set_audio_ctx(audio_ctx);
 
@@ -686,6 +688,7 @@ fn main() {
         // Remove Repetitions:
         // https://github.com/ggerganov/whisper.cpp/issues/896#issuecomment-1569586018
         // https://github.com/ggerganov/whisper.cpp/issues/471
+        // https://github.com/openai/whisper/discussions/679
         wparams.set_entropy_thold(2.8);
         // wparams.set_logprob_thold(-2.0);
         // wparams.set_no_speech_thold(0.8);
