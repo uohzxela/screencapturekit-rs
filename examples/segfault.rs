@@ -8,11 +8,10 @@ use rodio::{buffer::SamplesBuffer, DeviceTrait, OutputStream, OutputStreamHandle
 use rubato::{Resampler, SincFixedIn, SincInterpolationParameters, SincInterpolationType};
 use swap_buffer_queue::{buffer::{BufferSlice, VecBuffer}, error::TryDequeueError, Queue};
 use termion::{cursor::DetectCursorPos, raw::IntoRawMode};
-use whisper_rs::{DtwModelPreset, DtwParameters, FullParams, SamplingStrategy, WhisperContext, WhisperContextParameters};
+use whisper_rs::{DtwModelPreset, DtwParameters, FullParams, SamplingStrategy, WhisperContext, WhisperContextParameters, WhisperState};
 use once_cell::sync::Lazy;
 use crossbeam::channel::{unbounded, Receiver, Sender};
 
-use core_foundation::error::CFError;
 use core_media_rs::cm_sample_buffer::CMSampleBuffer;
 use screencapturekit::{
     shareable_content::SCShareableContent,
@@ -23,6 +22,7 @@ use screencapturekit::{
 };
 use clap::{Command, Arg};
 use std::process;
+use voice_activity_detector::{Error, VoiceActivityDetector};
 
 //TODO: https://pytorch.org/audio/master/tutorials/forced_alignment_tutorial.html
 
@@ -512,6 +512,77 @@ fn f32_to_i16(sample: f32) -> i16 {
 
 const WHISPER_SAMPLE_RATE: i32 = 16_000;
 
+fn transcribe(state: &mut WhisperState, speech: &mut Vec<f32>) -> String {
+    let mut wparams = FullParams::new(SamplingStrategy::BeamSearch { beam_size: 5, patience: 1.0 });
+    // let mut wparams = FullParams::new(SamplingStrategy::Greedy { best_of: 1 });
+    wparams.set_print_progress(false);
+    wparams.set_print_special(false);
+    wparams.set_print_realtime(false);
+    wparams.set_print_timestamps(false);
+    wparams.set_translate(false);
+    wparams.set_single_segment(false);
+    wparams.set_max_tokens(100);
+    // wparams.set_no_context(true);
+    // wparams.set_n_max_text_ctx(64);
+    // wparams.set_audio_ctx(audio_ctx);
+
+    wparams.set_language(Some("en"));
+    wparams.set_n_threads(8);
+    wparams.set_audio_ctx(0);
+    wparams.set_tdrz_enable(false);
+    wparams.set_temperature_inc(0.0);
+    wparams.set_no_timestamps(false);
+    // Remove Repetitions:
+    // https://github.com/ggerganov/whisper.cpp/issues/896#issuecomment-1569586018
+    // https://github.com/ggerganov/whisper.cpp/issues/471
+    // https://github.com/openai/whisper/discussions/679
+    wparams.set_entropy_thold(2.8);
+
+    let mut speech2 = speech.clone();
+    if speech2.len() <= WHISPER_SAMPLE_RATE as usize {
+        speech2.append(&mut vec![0.0 as f32; WHISPER_SAMPLE_RATE as usize - speech2.len() + 1600])
+    }
+
+    state
+        .full(wparams, &speech2)
+        .expect("failed to run model");
+    let num_segments = state
+        .full_n_segments()
+        .expect("failed to get number of segments");
+    let mut text = String::new();
+    for i in 0..num_segments {
+        let segment = state
+            .full_get_segment_text(i)
+            .expect("failed to get segment");
+        // if segment.len() == 0 {
+        //     panic!("empty segment")
+        // }
+        // let num_tokens = state.full_n_tokens(i).unwrap();
+        // for j in 0..num_tokens {
+        //     let token = state.full_get_token_data(i, j).unwrap();
+        //     // println!("t0: {}, t1: {}, dtw: {}", token.t0, token.t1, token.t_dtw);
+        // }
+        text.push_str(&segment);
+    }
+
+    text
+}
+fn end_recording(state: &mut WhisperState, speech: &mut Vec<f32>, term: &mut Term) {
+    let text = transcribe(state, speech);
+    print_captions(text, term, true);
+}
+
+fn print_captions(text: String, term: &mut Term, with_new_line: bool) {
+    term.clear_line().unwrap();
+    term.write_fmt(format_args!("{}", text)).unwrap();
+
+    if with_new_line {
+        write!(term, "\n").unwrap();
+    }
+
+    io::stdout().flush().unwrap();
+}
+
 fn main() {
     /* When more than this amount of audio received, run an iteration. */
     const trigger_ms: i32 = 400;
@@ -621,6 +692,14 @@ fn main() {
     let mut prev_n_tokens = 0;
     let mut retry_count = 0;
 
+    let mut silero = VoiceActivityDetector::builder()
+        .sample_rate(16_000)
+        .chunk_size(512usize)
+        .build().unwrap();
+    let mut vad = VADIterator::new(silero, 0.5, 16_000, 100, 64).unwrap();
+    let mut recording = false;
+    let mut recording_start_time = Instant::now();
+
     while running.load(Ordering::SeqCst) {
         let start_time = Instant::now();
         loop {
@@ -707,6 +786,55 @@ fn main() {
         // now we can run the model
         let data = &pcmf32.clone()[..];
         // println!("transcribing {} samples", data.len());
+
+        let mut speech: Vec<f32> = Vec::new();
+        let lookback_size = 5 * 512;
+
+        for chunk in data.chunks_exact(512) {
+            speech.extend(chunk);
+            if !recording && speech.len() > lookback_size {
+                speech = speech[speech.len() - lookback_size..].to_vec();
+            }
+            let vad_result = vad.process(chunk.to_vec());
+            match vad_result {
+                VADResult::Start(_) => {
+                    if !recording {
+                        println!("start");
+                        recording = true;
+                        recording_start_time = Instant::now();
+                    }
+                },
+                VADResult::End(_) => {
+                    if recording {
+                        println!("end");
+                        recording = false;
+                        end_recording(&mut state, &mut speech, &mut term);
+                        pcmf32.clear();
+                    }
+                },
+                VADResult::None => {
+                    if recording {
+                        if speech.len() / WHISPER_SAMPLE_RATE as usize > 8 {
+                            recording = false;
+                            end_recording(&mut state, &mut speech, &mut term);
+                            pcmf32.clear();
+                            vad.soft_reset();
+                        }
+
+                        if recording_start_time.elapsed() > Duration::from_millis(400) {
+
+                            let text = transcribe(&mut state, &mut speech);
+                            println!("refresh: {}", text);
+                            print_captions(text, &mut term, false);
+                            recording_start_time = Instant::now();
+                        }
+                    }
+                }
+            };
+        }
+
+        continue;
+
         state
             .full(wparams, data)
             .expect("failed to run model");
@@ -1033,6 +1161,101 @@ fn vad_simple(pcmf32: &mut [f32], sample_rate: i32, last_ms: i32, vad_thold: f32
     }
 
     energy_last <= vad_thold * energy_all
+}
+
+/// Enum to represent the output of the VADIterator
+#[derive(Debug, PartialEq)]
+pub enum VADResult {
+    Start(usize), // Start index in samples
+    End(usize),   // End index in samples
+    None,         // No event
+}
+
+pub struct VADIterator {
+    model: VoiceActivityDetector,
+    threshold: f32,
+    sampling_rate: usize,
+    min_silence_samples: usize,
+    speech_pad_samples: usize,
+    triggered: bool,
+    temp_end: usize,
+    current_sample: usize,
+}
+
+impl VADIterator {
+    pub fn new(
+        model: VoiceActivityDetector,
+        threshold: f32,
+        sampling_rate: usize,
+        min_silence_duration_ms: usize,
+        speech_pad_ms: usize,
+    ) -> Result<Self, Error> {
+        if sampling_rate != 8000 && sampling_rate != 16000 {
+            return Err(Error::VadConfigError { sample_rate: 16_000, chunk_size: 512 });
+        }
+
+        let min_silence_samples = sampling_rate * min_silence_duration_ms / 1000;
+        let speech_pad_samples = sampling_rate * speech_pad_ms / 1000;
+
+        Ok(Self {
+            model,
+            threshold,
+            sampling_rate,
+            min_silence_samples,
+            speech_pad_samples,
+            triggered: false,
+            temp_end: 0,
+            current_sample: 0,
+        })
+    }
+
+    pub fn soft_reset(&mut self) {
+        self.triggered = false;
+        self.temp_end = 0;
+        self.current_sample = 0;
+    }
+
+    pub fn reset_states(&mut self) {
+        self.model.reset();
+        self.triggered = false;
+        self.temp_end = 0;
+        self.current_sample = 0;
+    }
+
+    pub fn process(&mut self, audio_chunk: Vec<f32>) -> VADResult {
+        let window_size_samples = audio_chunk.len();
+        self.current_sample += window_size_samples;
+
+        let speech_prob = self.model.predict(audio_chunk);
+
+        if speech_prob >= self.threshold && self.temp_end != 0 {
+            self.temp_end = 0;
+        }
+
+        if speech_prob >= self.threshold && !self.triggered {
+            self.triggered = true;
+            let speech_start = self
+                .current_sample
+                .saturating_sub(self.speech_pad_samples + window_size_samples);
+            return VADResult::Start(speech_start);
+        }
+
+        if speech_prob < self.threshold - 0.15 && self.triggered {
+            if self.temp_end == 0 {
+                self.temp_end = self.current_sample;
+            }
+            if self.current_sample - self.temp_end < self.min_silence_samples {
+                return VADResult::None;
+            } else {
+                let speech_end = self.temp_end + self.speech_pad_samples - window_size_samples;
+                self.temp_end = 0;
+                self.triggered = false;
+                return VADResult::End(speech_end);
+            }
+        }
+
+        VADResult::None
+    }
 }
 
 // fn main2() {

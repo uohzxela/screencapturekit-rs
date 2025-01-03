@@ -49,3 +49,4 @@ whisper-rs = { git = "https://github.com/hlhr202/whisper-rs.git", branch = "feat
 rubato = "0.16.1"
 anyhow = "1.0.94"
 clap = "4.5.23"
+voice_activity_detector = "0.1.1"
