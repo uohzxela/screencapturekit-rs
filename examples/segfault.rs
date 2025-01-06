@@ -22,7 +22,7 @@ use screencapturekit::{
 };
 use clap::{Command, Arg};
 use std::process;
-use voice_activity_detector::{Error, VoiceActivityDetector};
+use voice_activity_detector::{Error, IteratorExt, LabeledAudio, VoiceActivityDetector};
 
 //TODO: https://pytorch.org/audio/master/tutorials/forced_alignment_tutorial.html
 
@@ -790,53 +790,82 @@ fn main() {
         let mut speech: Vec<f32> = Vec::new();
         let lookback_size = 5 * 512;
 
-        for chunk in data.chunks_exact(512) {
-            speech.extend(chunk);
-            if !recording && speech.len() > lookback_size {
-                speech = speech[speech.len() - lookback_size..].to_vec();
-            }
-            let vad_result = vad.process(chunk.to_vec());
-            match vad_result {
-                VADResult::Start(_) => {
-                    if !recording {
-                        println!("start");
-                        recording = true;
-                        recording_start_time = Instant::now();
-                    }
-                },
-                VADResult::End(_) => {
-                    if recording {
-                        println!("end");
-                        recording = false;
-                        end_recording(&mut state, &mut speech, &mut term);
-                        pcmf32.clear();
-                    }
-                },
-                VADResult::None => {
-                    if recording {
-                        if speech.len() / WHISPER_SAMPLE_RATE as usize > 8 {
-                            recording = false;
-                            end_recording(&mut state, &mut speech, &mut term);
-                            pcmf32.clear();
-                            vad.soft_reset();
-                        }
+        let vad_start = Instant::now();
 
-                        if recording_start_time.elapsed() > Duration::from_millis(400) {
+        let vad = VoiceActivityDetector::builder()
+            .sample_rate(16000)
+            .chunk_size(512usize)
+            .build().unwrap();
 
-                            let text = transcribe(&mut state, &mut speech);
-                            println!("refresh: {}", text);
-                            print_captions(text, &mut term, false);
-                            recording_start_time = Instant::now();
-                        }
-                    }
+        // This will label any audio chunks with a probability greater than 75% as speech,
+        // and label the 3 additional chunks before and after these chunks as speech.
+        let labels = pcmf32.clone().into_iter().label(vad, 0.75, 5);
+        // let num_labels = labels.count();
+        let mut filtered_samples: Vec<f32> = Vec::new();
+        for (i, label) in labels.enumerate() {
+            match label {
+                LabeledAudio::Speech(chunk) => {
+                    filtered_samples.extend(chunk);
+                },
+                LabeledAudio::NonSpeech(_) => {
+                    // println!("non-speech detected!")
                 }
-            };
+            }
         }
 
-        continue;
+        if filtered_samples.len() <= WHISPER_SAMPLE_RATE as usize {
+            filtered_samples.append(&mut vec![0.0 as f32; WHISPER_SAMPLE_RATE as usize - filtered_samples.len() + 1600])
+        }
+
+        // println!("elapsed vad time: {:?}", vad_start.elapsed());
+
+        // for chunk in data.chunks_exact(512) {
+        //     speech.extend(chunk);
+        //     if !recording && speech.len() > lookback_size {
+        //         speech = speech[speech.len() - lookback_size..].to_vec();
+        //     }
+        //     let vad_result = vad.process(chunk.to_vec());
+        //     match vad_result {
+        //         VADResult::Start(_) => {
+        //             if !recording {
+        //                 println!("start");
+        //                 recording = true;
+        //                 recording_start_time = Instant::now();
+        //             }
+        //         },
+        //         VADResult::End(_) => {
+        //             if recording {
+        //                 println!("end");
+        //                 recording = false;
+        //                 end_recording(&mut state, &mut speech, &mut term);
+        //                 pcmf32.clear();
+        //             }
+        //         },
+        //         VADResult::None => {
+        //             if recording {
+        //                 if speech.len() / WHISPER_SAMPLE_RATE as usize > 8 {
+        //                     recording = false;
+        //                     end_recording(&mut state, &mut speech, &mut term);
+        //                     pcmf32.clear();
+        //                     vad.soft_reset();
+        //                 }
+
+        //                 if recording_start_time.elapsed() > Duration::from_millis(400) {
+
+        //                     let text = transcribe(&mut state, &mut speech);
+        //                     println!("refresh: {}", text);
+        //                     print_captions(text, &mut term, false);
+        //                     recording_start_time = Instant::now();
+        //                 }
+        //             }
+        //         }
+        //     };
+        // }
+
+        // continue;
 
         state
-            .full(wparams, data)
+            .full(wparams, &filtered_samples)
             .expect("failed to run model");
         let duration_full = start_time.elapsed();
         // println!("Execution time of full_whisper: {:?}", duration_full);
@@ -906,6 +935,7 @@ fn main() {
             continue;
         }
 
+        // let mut segment_text = String::new();
         for i in 0..num_segments {
             let segment = state
                 .full_get_segment_text(i)
@@ -945,8 +975,14 @@ fn main() {
         if pcmf32.len() as i32 > n_samples_iter_threshold || speech_has_end {
             // Don't terminate current line if curr n_tokens below a certain threshold
             if segment_len < 15 {
+                // If this condition is hit then there's no speech for 15+ secs
+                if pcmf32.len() as i32 > n_samples_iter_threshold {
+                    pcmf32.clear();
+                    continue;
+                }
                 continue;
             }
+
             prev_num_segments = 0;
             prev_seg_len = 0;
             prev_n_tokens = 0;
