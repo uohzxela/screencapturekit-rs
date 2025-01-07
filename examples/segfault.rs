@@ -585,7 +585,7 @@ fn print_captions(text: String, term: &mut Term, with_new_line: bool) {
 
 fn main() {
     /* When more than this amount of audio received, run an iteration. */
-    const trigger_ms: i32 = 400;
+    const trigger_ms: i32 = 200;
     const n_samples_trigger: i32 = ((trigger_ms as f32 / 1000.0) * WHISPER_SAMPLE_RATE as f32) as i32;
 
     /**
@@ -595,7 +595,7 @@ fn main() {
      */
     // This is recommended to be smaller than the time wparams.audio_ctx
     // represents so an iteration can fit in one chunk.
-    const iter_threshold_ms: i32 = trigger_ms * 20;
+    const iter_threshold_ms: i32 = trigger_ms * 30;
     const n_samples_iter_threshold: i32 = ((iter_threshold_ms as f32 / 1000.0) * WHISPER_SAMPLE_RATE as f32) as i32;
 
     /* VAD parameters */
@@ -607,7 +607,7 @@ fn main() {
 
     // Keep the last 0.5s of an iteration to the next one for better
     // transcription at begin/end.
-    const n_samples_keep_iter: i32 = (WHISPER_SAMPLE_RATE as f32 * 1.5) as i32;
+    const n_samples_keep_iter: i32 = (WHISPER_SAMPLE_RATE as f32 * 1.0) as i32;
     const vad_thold: f32 = 0.1;
     const freq_thold: f32 = 200.0;
 
@@ -980,11 +980,11 @@ fn main() {
         if pcmf32.len() as i32 > n_samples_iter_threshold || speech_has_end {
             // Don't terminate current line if curr n_tokens below a certain threshold
             if segment_len < 15 {
-                // // If this condition is hit then there's no speech for 15+ secs
-                // if pcmf32.len() as i32 > n_samples_iter_threshold {
-                //     pcmf32.clear();
-                //     continue;
-                // }
+                // If this condition is hit then there's no speech for 15+ secs
+                if pcmf32.len() as i32 > n_samples_iter_threshold * 2 {
+                    pcmf32.clear();
+                    continue;
+                }
                 continue;
             }
 
