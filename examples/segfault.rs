@@ -799,7 +799,7 @@ fn main() {
 
         // This will label any audio chunks with a probability greater than 75% as speech,
         // and label the 3 additional chunks before and after these chunks as speech.
-        let labels = pcmf32.clone().into_iter().label(vad, 0.75, 5);
+        let labels = pcmf32.clone().into_iter().label(vad, 0.5, 5);
         // let num_labels = labels.count();
         let mut filtered_samples: Vec<f32> = Vec::new();
         for (i, label) in labels.enumerate() {
@@ -811,6 +811,11 @@ fn main() {
                     // println!("non-speech detected!")
                 }
             }
+        }
+
+        if filtered_samples.len() == 0 {
+            pcmf32.clear();
+            continue;
         }
 
         if filtered_samples.len() <= WHISPER_SAMPLE_RATE as usize {
@@ -975,11 +980,11 @@ fn main() {
         if pcmf32.len() as i32 > n_samples_iter_threshold || speech_has_end {
             // Don't terminate current line if curr n_tokens below a certain threshold
             if segment_len < 15 {
-                // If this condition is hit then there's no speech for 15+ secs
-                if pcmf32.len() as i32 > n_samples_iter_threshold {
-                    pcmf32.clear();
-                    continue;
-                }
+                // // If this condition is hit then there's no speech for 15+ secs
+                // if pcmf32.len() as i32 > n_samples_iter_threshold {
+                //     pcmf32.clear();
+                //     continue;
+                // }
                 continue;
             }
 
@@ -1001,7 +1006,7 @@ fn main() {
         io::stdout().flush().unwrap();
     }
     audio.stop();
-    println!("Got it! Exiting...");
+    println!("\nGot it! Exiting...");
 }
 
 use std::cmp;
