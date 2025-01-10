@@ -595,7 +595,7 @@ fn main() {
      */
     // This is recommended to be smaller than the time wparams.audio_ctx
     // represents so an iteration can fit in one chunk.
-    const iter_threshold_ms: i32 = trigger_ms * 30;
+    const iter_threshold_ms: i32 = trigger_ms * 40;
     const n_samples_iter_threshold: i32 = ((iter_threshold_ms as f32 / 1000.0) * WHISPER_SAMPLE_RATE as f32) as i32;
 
     /* VAD parameters */
@@ -607,7 +607,7 @@ fn main() {
 
     // Keep the last 0.5s of an iteration to the next one for better
     // transcription at begin/end.
-    const n_samples_keep_iter: i32 = (WHISPER_SAMPLE_RATE as f32 * 1.0) as i32;
+    const n_samples_keep_iter: i32 = (WHISPER_SAMPLE_RATE as f32 * 0.5) as i32;
     const vad_thold: f32 = 0.1;
     const freq_thold: f32 = 200.0;
 
