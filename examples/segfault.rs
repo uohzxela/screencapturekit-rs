@@ -1,5 +1,5 @@
 use core::num;
-use std::{cmp::min, fs::File, io::{self, BufReader, BufWriter, Write}, path::PathBuf, sync::{atomic::{AtomicBool, Ordering}, mpsc::{self, SyncSender}, Arc, Mutex}, thread::{self, sleep, JoinHandle}, time::{self, Duration, Instant}};
+use std::{cmp::min, fs::File, io::{self, BufReader, BufWriter, Write}, path::{Path, PathBuf}, sync::{atomic::{AtomicBool, Ordering}, mpsc::{self, SyncSender}, Arc, Mutex}, thread::{self, sleep, JoinHandle}, time::{self, Duration, Instant}};
 
 use console::Term;
 use cpal::{traits::{HostTrait, StreamTrait}, BufferSize, FromSample, Sample, Stream, StreamConfig};
@@ -583,6 +583,18 @@ fn print_captions(text: String, term: &mut Term, with_new_line: bool) {
     io::stdout().flush().unwrap();
 }
 
+fn load_audio_file(file_path: &str) -> Result<Vec<f32>, Box<dyn std::error::Error>> {
+    // This is a simplified example - you'll need to implement proper audio file reading
+    // based on your audio library (e.g., hound for WAV files, symphonia for multiple formats)
+
+    // Example using hound for WAV files:
+    let mut reader = hound::WavReader::open(file_path)?;
+    let samples: Result<Vec<f32>, _> = reader.samples::<i16>()
+        .map(|s| s.map(|sample| sample as f32 / i16::MAX as f32))
+        .collect();
+    Ok(samples?)
+}
+
 fn main() {
     /* When more than this amount of audio received, run an iteration. */
     const trigger_ms: i32 = 200;
@@ -621,8 +633,7 @@ fn main() {
                 .long("source")
                 .short('s')
                 .required(true)
-                .value_parser(["mic", "sys"])
-                .help("Choose the audio source: 'mic' or 'sys'"),
+                .help("Choose the audio source: 'mic', 'sys', or path to audio file"),
         )
         .get_matches();
 
@@ -630,6 +641,101 @@ fn main() {
     let source = matches
         .get_one::<String>("source")
         .expect("Argument 'source' is required").as_str();
+
+    // Check if source is a file path
+    if source != "mic" && source != "sys" {
+        // Assume it's a file path
+        if !Path::new(source).exists() {
+            eprintln!("Error: File '{}' does not exist.", source);
+            process::exit(1);
+        }
+
+        println!("Transcribing audio file: {}", source);
+
+        // Initialize Whisper
+        let mut whisper_ctx_params = WhisperContextParameters::default();
+        whisper_ctx_params.use_gpu(true);
+        whisper_ctx_params.flash_attn(true);
+
+        let whisper_ctx = WhisperContext::new_with_params(
+            "/Users/jiaalex/Whisper/whisper.cpp/models/ggml-base.en.bin",
+            whisper_ctx_params
+        ).expect("failed to load model");
+
+        let mut state = whisper_ctx.create_state().expect("failed to create state");
+
+        // Load audio file
+        let audio_data = match load_audio_file(source) {
+            Ok(data) => data,
+            Err(e) => {
+                eprintln!("Error loading audio file: {}", e);
+                eprintln!("Note: You need to implement audio file loading for your specific audio format.");
+                eprintln!("Consider using libraries like 'hound' for WAV files or 'symphonia' for multiple formats.");
+                process::exit(1);
+            }
+        };
+
+        println!("Audio file loaded successfully. {} samples", audio_data.len());
+
+        // Set up Whisper parameters for file transcription
+        let mut wparams = FullParams::new(SamplingStrategy::BeamSearch { beam_size: 5, patience: 1.0 });
+        wparams.set_print_progress(false);
+        wparams.set_print_special(false);
+        wparams.set_print_realtime(false);
+        wparams.set_print_timestamps(true); // Enable timestamps for file transcription
+        wparams.set_translate(false);
+        wparams.set_single_segment(false);
+        wparams.set_max_tokens(0); // No limit for file transcription
+        wparams.set_language(Some("en"));
+        wparams.set_n_threads(8);
+        wparams.set_audio_ctx(0);
+        wparams.set_tdrz_enable(false);
+        wparams.set_temperature_inc(0.0);
+        wparams.set_no_timestamps(false);
+        wparams.set_entropy_thold(2.8);
+
+        // Start transcription timing
+        let transcription_start = Instant::now();
+
+        // Run transcription
+        state
+            .full(wparams, &audio_data)
+            .expect("failed to run model");
+
+        let transcription_elapsed = transcription_start.elapsed();
+        let transcription_ms = transcription_elapsed.as_millis();
+
+        // Get and print results
+        let num_segments = state
+            .full_n_segments()
+            .expect("failed to get number of segments");
+
+        println!("\n=== Transcription Results ===");
+        for i in 0..num_segments {
+            let segment = state
+                .full_get_segment_text(i)
+                .expect("failed to get segment");
+
+            // Get timestamps if available
+            let start_time = state.full_get_segment_t0(i).unwrap_or(0);
+            let end_time = state.full_get_segment_t1(i).unwrap_or(0);
+
+            // Convert from centiseconds to seconds
+            let start_sec = start_time as f32 / 100.0;
+            let end_sec = end_time as f32 / 100.0;
+
+            println!("[{:.2}s -> {:.2}s] {}", start_sec, end_sec, segment.trim());
+        }
+
+        println!("\n=== Transcription Complete ===");
+        println!("Elapsed time: {} ms", transcription_ms);
+        println!("Audio duration: {:.2} seconds", audio_data.len() as f32 / WHISPER_SAMPLE_RATE as f32);
+        println!("Real-time factor: {:.2}x",
+                 (audio_data.len() as f32 / WHISPER_SAMPLE_RATE as f32 * 1000.0) / transcription_ms as f32);
+
+        // Exit early for file transcription
+        return;
+    }
 
     // Initialize the appropriate audio source
     let mut audio: AudioSourceEnum = match source {
@@ -666,8 +772,8 @@ fn main() {
     let whisper_ctx = WhisperContext::new_with_params(
 		// "/Users/jiaalex/Whisper/whisper.cpp/models/ggml-large-v3-turbo-q5_0.bin",
         // "/Users/jiaalex/Whisper/whisper.cpp/models/ggml-medium.bin",
-        "/Users/jiaalex/Whisper/whisper.cpp/models/ggml-small.en.bin",
-        // "/Users/jiaalex/Whisper/whisper.cpp/models/ggml-base.en.bin",
+        // "/Users/jiaalex/Whisper/whisper.cpp/models/ggml-small.en.bin",
+        "/Users/jiaalex/Whisper/whisper.cpp/models/ggml-base.en.bin",
 		whisper_ctx_params
 	).expect("failed to load model");
 
@@ -728,7 +834,7 @@ fn main() {
                 }
             }
 
-            // println!("queue len not enough: {}", queue.len());
+            // println!("queue len not enough: {}", queue_len);
 
             // sleep(Duration::from_millis(10));
         }
@@ -764,6 +870,7 @@ fn main() {
         wparams.set_tdrz_enable(false);
         wparams.set_temperature_inc(0.0);
         wparams.set_no_timestamps(false);
+        // wparams.set_detect_language(true);
         // Remove Repetitions:
         // https://github.com/ggerganov/whisper.cpp/issues/896#issuecomment-1569586018
         // https://github.com/ggerganov/whisper.cpp/issues/471
@@ -917,9 +1024,14 @@ fn main() {
         //     continue;
         // }
 
-        if segment_len < prev_seg_len && retry_count < 5 {
+        if segment_len < prev_seg_len && retry_count < 3 {
             retry_count += 1;
             // Mostly likely endless repetition here
+            continue;
+        }
+
+        if (segment_len as f32) / (prev_seg_len as f32) < 0.3 {
+            // Massive text loss happening here, don't proceed until ratio > 0.3
             continue;
         }
 
