@@ -1,15 +1,12 @@
-use core::num;
-use std::{cmp::min, fs::File, io::{self, BufReader, BufWriter, Write}, path::{Path, PathBuf}, sync::{atomic::{AtomicBool, Ordering}, mpsc::{self, SyncSender}, Arc, Mutex}, thread::{self, sleep, JoinHandle}, time::{self, Duration, Instant}};
+use std::{cmp::min, fs::File, io::{self, BufWriter, Write}, path::{Path}, sync::{atomic::{AtomicBool, Ordering}, mpsc::{self, SyncSender}, Arc, Mutex}, thread::{sleep, JoinHandle}, time::{Duration, Instant}};
 
 use console::Term;
-use cpal::{traits::{HostTrait, StreamTrait}, BufferSize, FromSample, Sample, Stream, StreamConfig};
+use cpal::{traits::{HostTrait, StreamTrait}, BufferSize, Stream, StreamConfig};
 use hound::{WavSpec, WavWriter};
-use rodio::{buffer::SamplesBuffer, DeviceTrait, OutputStream, OutputStreamHandle, Source};
+use rodio::{DeviceTrait, OutputStream, OutputStreamHandle};
 use rubato::{Resampler, SincFixedIn, SincInterpolationParameters, SincInterpolationType};
-use swap_buffer_queue::{buffer::{BufferSlice, VecBuffer}, error::TryDequeueError, Queue};
-use termion::{cursor::DetectCursorPos, raw::IntoRawMode};
-use whisper_rs::{DtwModelPreset, DtwParameters, FullParams, SamplingStrategy, WhisperContext, WhisperContextParameters, WhisperState};
-use once_cell::sync::Lazy;
+use swap_buffer_queue::{buffer::{VecBuffer}, Queue};
+use whisper_rs::{FullParams, SamplingStrategy, WhisperContext, WhisperContextParameters};
 use crossbeam::channel::{unbounded, Receiver, Sender};
 
 use core_media_rs::cm_sample_buffer::CMSampleBuffer;
@@ -26,21 +23,6 @@ use voice_activity_detector::{Error, IteratorExt, LabeledAudio, VoiceActivityDet
 
 //TODO: https://pytorch.org/audio/master/tutorials/forced_alignment_tutorial.html
 
-
-// use std::{
-//     fs::OpenOptions,
-//     io::Write,
-//     sync::mpsc::{channel, Sender},
-//     thread,
-//     time::Duration,
-// };
-
-// struct ErrorHandler;
-// impl StreamErrorHandler for ErrorHandler {
-//     fn on_error(&self) {
-//         println!("Error!");
-//     }
-// }
 
 // Define the structure for the audio file writer
 pub struct AudioFileWriter {
@@ -70,11 +52,11 @@ impl AudioFileWriter {
     }
 }
 
-pub struct CapturerWrapper {
-    capturer: Arc<Mutex<Capturer>>
+pub struct ScreenCaptureWrapper {
+    capturer: Arc<Mutex<ScreenCapturer>>
 }
 
-impl SCStreamOutputTrait for CapturerWrapper {
+impl SCStreamOutputTrait for ScreenCaptureWrapper {
     fn did_output_sample_buffer(&self, sample_buffer: CMSampleBuffer, of_type: SCStreamOutputType) {
         let start_time = Instant::now();
         self.capturer.lock().unwrap().did_output_sample_buffer(sample_buffer, of_type);
@@ -90,14 +72,14 @@ trait AudioSource {
     fn drain_queue(&self) -> Result<Vec<f32>, anyhow::Error>;
 }
 
-struct AudioAsyncMic {
+struct MicAudioSource {
     queue: Arc<Queue<VecBuffer<f32>>>,
     processing_handle: Option<JoinHandle<()>>,
     stream: Option<Stream>,
     tx: Option<SyncSender<Vec<f32>>>,
 }
 
-impl AudioAsyncMic {
+impl MicAudioSource {
     fn new() -> Result<Self, anyhow::Error> {
         // Use the default audio input device.
         let host = cpal::default_host();
@@ -180,7 +162,7 @@ impl AudioAsyncMic {
             }
         });
 
-        Ok(AudioAsyncMic {
+        Ok(MicAudioSource {
             queue: audio_buffer,
             processing_handle: Some(processing_handle),
             stream: Some(stream),
@@ -189,7 +171,7 @@ impl AudioAsyncMic {
     }
 }
 
-impl AudioSource for AudioAsyncMic {
+impl AudioSource for MicAudioSource {
     fn start(&self) -> Result<(), anyhow::Error> {
         if let Some(ref stream) = self.stream {
             stream.play()?;
@@ -237,14 +219,14 @@ fn process_audio(audio_chunk: &[f32], audio_buffer: &Arc<Queue<VecBuffer<f32>>>)
     }
 }
 
-struct AudioAsyncNew {
-    capturer: Arc<Mutex<Capturer>>,
+struct SystemAudioSource {
+    capturer: Arc<Mutex<ScreenCapturer>>,
     stream: Arc<SCStream>,
     rx: Receiver<Vec<f32>>
 }
 
-impl AudioAsyncNew {
-    fn new() -> Result<AudioAsyncNew, anyhow::Error> {
+impl SystemAudioSource {
+    fn new() -> Result<SystemAudioSource, anyhow::Error> {
         let sample_rate = 16_000;
         let channel_count = 1;
 
@@ -260,12 +242,12 @@ impl AudioAsyncNew {
         let filter = SCContentFilter::new().with_display_excluding_windows(&display, &[]);
         let mut stream = SCStream::new(&filter, &config);
 
-        let capturer = Capturer::new("asdf.wav", 16_000, 1, tx);
-        let capturer_wrapper1 = CapturerWrapper { capturer: Arc::new(Mutex::new(capturer)) };
-        let capturer_wrapper2 = CapturerWrapper { capturer: capturer_wrapper1.capturer.clone() };
+        let capturer = ScreenCapturer::new("asdf.wav", 16_000, 1, tx);
+        let capturer_wrapper1 = ScreenCaptureWrapper { capturer: Arc::new(Mutex::new(capturer)) };
+        let capturer_wrapper2 = ScreenCaptureWrapper { capturer: capturer_wrapper1.capturer.clone() };
         stream.add_output_handler(capturer_wrapper1, SCStreamOutputType::Audio);
         let stream_clone = Arc::new(stream);
-        let res = AudioAsyncNew {
+        let res = SystemAudioSource {
             capturer: capturer_wrapper2.capturer.clone(),
             stream: stream_clone,
             rx
@@ -285,7 +267,7 @@ impl AudioAsyncNew {
     }
 }
 
-impl AudioSource for AudioAsyncNew {
+impl AudioSource for SystemAudioSource {
     // fn get_queue(&self) -> &Queue<VecBuffer<f32>> {
     //     &self.capturer.lock().unwrap().queue
     // }
@@ -395,7 +377,7 @@ impl AudioAsync {
     }
 }
 
-pub struct Capturer {
+pub struct ScreenCapturer {
     stream_handle: OutputStreamHandle,
     buffer: Vec<f32>,
     tx: Sender<Vec<f32>>,
@@ -404,11 +386,11 @@ pub struct Capturer {
     callback_count: i32
 }
 
-impl Capturer {
+impl ScreenCapturer {
     pub fn new(audio_file_path: &str, sample_rate: u32, channels: u16, tx: Sender<Vec<f32>>) -> Self {
         // let audio_writer = AudioFileWriter::new(audio_file_path, sample_rate, channels);
         let (_stream, stream_handle) = OutputStream::try_default().unwrap();
-        Capturer {
+        ScreenCapturer {
             stream_handle,
             buffer: Default::default(),
             tx,
@@ -419,9 +401,7 @@ impl Capturer {
     }
 }
 
-static mut AUDIO_BUFFER: Lazy<Vec<f32>> = Lazy::new(|| Default::default());
-
-impl SCStreamOutputTrait for Capturer {
+impl SCStreamOutputTrait for ScreenCapturer {
     fn did_output_sample_buffer(&self, sample: CMSampleBuffer, of_type: SCStreamOutputType) {
         // println!("[Capturer] thread id: {:?}", std::thread::current().id());
         // println!("New frame recvd");
@@ -452,36 +432,36 @@ impl SCStreamOutputTrait for Capturer {
 }
 
 enum AudioSourceEnum {
-    Mic(AudioAsyncMic),
-    New(AudioAsyncNew),
+    Mic(MicAudioSource),
+    Sys(SystemAudioSource),
 }
 
 impl AudioSource for AudioSourceEnum {
     fn start(&self) -> Result<(), anyhow::Error> {
         match self {
             AudioSourceEnum::Mic(mic) => mic.start(),
-            AudioSourceEnum::New(new) => new.start(),
+            AudioSourceEnum::Sys(sys) => sys.start(),
         }
     }
 
     fn stop(&mut self) -> Result<(), anyhow::Error> {
         match self {
             AudioSourceEnum::Mic(mic) => mic.stop(),
-            AudioSourceEnum::New(new) => new.stop(),
+            AudioSourceEnum::Sys(sys) => sys.stop(),
         }
     }
 
     fn get_queue_len(&self) -> usize {
         match self {
             AudioSourceEnum::Mic(mic) => mic.get_queue_len(),
-            AudioSourceEnum::New(new) => new.get_queue_len(),
+            AudioSourceEnum::Sys(sys) => sys.get_queue_len(),
         }
     }
 
     fn drain_queue(&self) -> Result<Vec<f32>, anyhow::Error> {
         match self {
             AudioSourceEnum::Mic(mic) => mic.drain_queue(),
-            AudioSourceEnum::New(new) => new.drain_queue(),
+            AudioSourceEnum::Sys(sys) => sys.drain_queue(),
         }
     }
 }
@@ -511,77 +491,6 @@ fn f32_to_i16(sample: f32) -> i16 {
 }
 
 const WHISPER_SAMPLE_RATE: i32 = 16_000;
-
-fn transcribe(state: &mut WhisperState, speech: &mut Vec<f32>) -> String {
-    let mut wparams = FullParams::new(SamplingStrategy::BeamSearch { beam_size: 5, patience: 1.0 });
-    // let mut wparams = FullParams::new(SamplingStrategy::Greedy { best_of: 1 });
-    wparams.set_print_progress(false);
-    wparams.set_print_special(false);
-    wparams.set_print_realtime(false);
-    wparams.set_print_timestamps(false);
-    wparams.set_translate(false);
-    wparams.set_single_segment(false);
-    wparams.set_max_tokens(100);
-    // wparams.set_no_context(true);
-    // wparams.set_n_max_text_ctx(64);
-    // wparams.set_audio_ctx(audio_ctx);
-
-    wparams.set_language(Some("en"));
-    wparams.set_n_threads(8);
-    wparams.set_audio_ctx(0);
-    wparams.set_tdrz_enable(false);
-    wparams.set_temperature_inc(0.0);
-    wparams.set_no_timestamps(false);
-    // Remove Repetitions:
-    // https://github.com/ggerganov/whisper.cpp/issues/896#issuecomment-1569586018
-    // https://github.com/ggerganov/whisper.cpp/issues/471
-    // https://github.com/openai/whisper/discussions/679
-    wparams.set_entropy_thold(2.8);
-
-    let mut speech2 = speech.clone();
-    if speech2.len() <= WHISPER_SAMPLE_RATE as usize {
-        speech2.append(&mut vec![0.0 as f32; WHISPER_SAMPLE_RATE as usize - speech2.len() + 1600])
-    }
-
-    state
-        .full(wparams, &speech2)
-        .expect("failed to run model");
-    let num_segments = state
-        .full_n_segments()
-        .expect("failed to get number of segments");
-    let mut text = String::new();
-    for i in 0..num_segments {
-        let segment = state
-            .full_get_segment_text(i)
-            .expect("failed to get segment");
-        // if segment.len() == 0 {
-        //     panic!("empty segment")
-        // }
-        // let num_tokens = state.full_n_tokens(i).unwrap();
-        // for j in 0..num_tokens {
-        //     let token = state.full_get_token_data(i, j).unwrap();
-        //     // println!("t0: {}, t1: {}, dtw: {}", token.t0, token.t1, token.t_dtw);
-        // }
-        text.push_str(&segment);
-    }
-
-    text
-}
-fn end_recording(state: &mut WhisperState, speech: &mut Vec<f32>, term: &mut Term) {
-    let text = transcribe(state, speech);
-    print_captions(text, term, true);
-}
-
-fn print_captions(text: String, term: &mut Term, with_new_line: bool) {
-    term.clear_line().unwrap();
-    term.write_fmt(format_args!("{}", text)).unwrap();
-
-    if with_new_line {
-        write!(term, "\n").unwrap();
-    }
-
-    io::stdout().flush().unwrap();
-}
 
 fn load_audio_file(file_path: &str) -> Result<Vec<f32>, Box<dyn std::error::Error>> {
     // This is a simplified example - you'll need to implement proper audio file reading
@@ -741,11 +650,11 @@ fn main() {
     let mut audio: AudioSourceEnum = match source {
         "mic" => {
             println!("Using microphone audio.");
-            AudioSourceEnum::Mic(AudioAsyncMic::new().expect("Failed to initialize microphone audio"))
+            AudioSourceEnum::Mic(MicAudioSource::new().expect("Failed to initialize microphone audio"))
         }
         "sys" => {
             println!("Using system audio.");
-            AudioSourceEnum::New(AudioAsyncNew::new().expect("Failed to initialize system audio"))
+            AudioSourceEnum::Sys(SystemAudioSource::new().expect("Failed to initialize system audio"))
         }
         _ => {
             eprintln!("Invalid audio source specified.");
@@ -929,53 +838,6 @@ fn main() {
             filtered_samples.append(&mut vec![0.0 as f32; WHISPER_SAMPLE_RATE as usize - filtered_samples.len() + 1600])
         }
 
-        // println!("elapsed vad time: {:?}", vad_start.elapsed());
-
-        // for chunk in data.chunks_exact(512) {
-        //     speech.extend(chunk);
-        //     if !recording && speech.len() > lookback_size {
-        //         speech = speech[speech.len() - lookback_size..].to_vec();
-        //     }
-        //     let vad_result = vad.process(chunk.to_vec());
-        //     match vad_result {
-        //         VADResult::Start(_) => {
-        //             if !recording {
-        //                 println!("start");
-        //                 recording = true;
-        //                 recording_start_time = Instant::now();
-        //             }
-        //         },
-        //         VADResult::End(_) => {
-        //             if recording {
-        //                 println!("end");
-        //                 recording = false;
-        //                 end_recording(&mut state, &mut speech, &mut term);
-        //                 pcmf32.clear();
-        //             }
-        //         },
-        //         VADResult::None => {
-        //             if recording {
-        //                 if speech.len() / WHISPER_SAMPLE_RATE as usize > 8 {
-        //                     recording = false;
-        //                     end_recording(&mut state, &mut speech, &mut term);
-        //                     pcmf32.clear();
-        //                     vad.soft_reset();
-        //                 }
-
-        //                 if recording_start_time.elapsed() > Duration::from_millis(400) {
-
-        //                     let text = transcribe(&mut state, &mut speech);
-        //                     println!("refresh: {}", text);
-        //                     print_captions(text, &mut term, false);
-        //                     recording_start_time = Instant::now();
-        //                 }
-        //             }
-        //         }
-        //     };
-        // }
-
-        // continue;
-
         state
             .full(wparams, &filtered_samples)
             .expect("failed to run model");
@@ -1123,148 +985,6 @@ fn main() {
 
 use std::cmp;
 
-#[derive(Debug)]
-struct TranscriptionBuffer {
-    current_text: String,
-    prev_segment: String,
-}
-
-impl TranscriptionBuffer {
-    fn new() -> Self {
-        Self {
-            current_text: String::new(),
-            prev_segment: String::new(),
-        }
-    }
-
-    fn join_segments(&mut self, new_segment: &str) -> String {
-        if self.prev_segment.is_empty() {
-            self.prev_segment = new_segment.to_string();
-            return new_segment.to_string();
-        }
-
-        // Find the overlap point using sliding window and edit distance
-        let overlap_point = self.find_overlap_point(&self.prev_segment, new_segment);
-
-        if let Some((start_idx, _)) = overlap_point {
-            // Join segments at the found overlap point
-            let joined = format!("{}{}",
-                self.prev_segment,
-                &new_segment[start_idx..]
-            );
-            self.prev_segment = joined.clone();
-            joined
-        } else {
-            // If no overlap found, just append with a space
-            let joined = format!("{} {}", self.prev_segment, new_segment);
-            self.prev_segment = joined.clone();
-            joined
-        }
-    }
-
-    fn find_overlap_point(&self, prev: &str, current: &str) -> Option<(usize, f32)> {
-        let prev_words: Vec<&str> = prev.split_whitespace().collect();
-        let curr_words: Vec<&str> = current.split_whitespace().collect();
-
-        // Look for overlapping sequences
-        let min_overlap = 3; // Minimum words to consider as valid overlap
-        let max_overlap = cmp::min(prev_words.len(), curr_words.len());
-
-        let mut best_match: Option<(usize, f32)> = None;
-        let mut min_distance = f32::MAX;
-
-        for window_size in (min_overlap..=max_overlap).rev() {
-            for start_idx in 0..curr_words.len() - window_size + 1 {
-                if start_idx + window_size > curr_words.len() {
-                    continue;
-                }
-
-                let curr_window = &curr_words[start_idx..start_idx + window_size];
-
-                // Look for this window in the previous segment
-                for prev_start in 0..=prev_words.len() - window_size {
-                    let prev_window = &prev_words[prev_start..prev_start + window_size];
-
-                    let distance = self.compute_window_distance(prev_window, curr_window);
-
-                    // If we found a perfect match
-                    if distance == 0.0 {
-                        let char_pos = curr_words[..start_idx].iter()
-                            .map(|w| w.len() + 1)
-                            .sum();
-                        return Some((char_pos, 0.0));
-                    }
-
-                    // Keep track of best partial match
-                    if distance < min_distance {
-                        min_distance = distance;
-                        let char_pos = curr_words[..start_idx].iter()
-                            .map(|w| w.len() + 1)
-                            .sum();
-                        best_match = Some((char_pos, distance));
-                    }
-                }
-            }
-        }
-
-        // Return best match if it's good enough
-        if min_distance < 0.3 { // Threshold for acceptable partial matches
-            best_match
-        } else {
-            None
-        }
-    }
-
-    fn compute_window_distance(&self, window1: &[&str], window2: &[&str]) -> f32 {
-        if window1.len() != window2.len() {
-            return f32::MAX;
-        }
-
-        let total_words = window1.len();
-        let mut total_distance = 0.0;
-
-        for (w1, w2) in window1.iter().zip(window2.iter()) {
-            total_distance += self.levenshtein_distance(w1, w2) as f32;
-        }
-
-        total_distance / total_words as f32
-    }
-
-    fn levenshtein_distance(&self, s1: &str, s2: &str) -> usize {
-        let len1 = s1.chars().count();
-        let len2 = s2.chars().count();
-
-        if len1 == 0 { return len2; }
-        if len2 == 0 { return len1; }
-
-        let mut matrix = vec![vec![0; len2 + 1]; len1 + 1];
-
-        for i in 0..=len1 {
-            matrix[i][0] = i;
-        }
-        for j in 0..=len2 {
-            matrix[0][j] = j;
-        }
-
-        for (i, c1) in s1.chars().enumerate() {
-            for (j, c2) in s2.chars().enumerate() {
-                let substitution_cost = if c1 == c2 { 0 } else { 1 };
-                matrix[i + 1][j + 1] = [
-                    matrix[i][j + 1] + 1,                // deletion
-                    matrix[i + 1][j] + 1,                // insertion
-                    matrix[i][j] + substitution_cost,    // substitution
-                ].iter().min().unwrap().clone();
-            }
-        }
-
-        matrix[len1][len2]
-    }
-
-    fn clear_on_speech_end(&mut self) {
-        self.prev_segment.clear();
-    }
-}
-
 fn high_pass_filter(data: &mut [f32], cutoff: f32, sample_rate: f32) {
     const PI: f32 = std::f32::consts::PI;
     let rc = 1.0 / (2.0 * PI * cutoff);
@@ -1410,89 +1130,3 @@ impl VADIterator {
         VADResult::None
     }
 }
-
-// fn main2() {
-//     println!("Starting");
-
-//     let content = SCShareableContent::current();
-//     let displays = content.displays;
-
-//     let display = displays.first().unwrap_or_else(|| {
-//         panic!("Main display not found");
-//     });
-//     let display = display.to_owned();
-
-//     let width = display.width;
-//     let height = display.height;
-
-//     let params = InitParams::Display(display);
-//     let filter = SCContentFilter::new(params);
-
-//     let stream_config = SCStreamConfiguration {
-//         width,
-//         height,
-//         captures_audio: true,
-//         sample_rate: 16_000,
-//         channel_count: 1,
-//         ..Default::default()
-//     };
-
-//     let (tx, rx) = unbounded::<Vec<f32>>();
-
-//     let mut stream = SCStream::new(filter, stream_config, ErrorHandler);
-//     let capturer = Capturer::new("asdf.wav", 16_000, 1, tx);
-//     let capturer_wrapper1 = CapturerWrapper { capturer: Arc::new(Mutex::new(capturer)) };
-//     let capturer_wrapper2 = CapturerWrapper { capturer: capturer_wrapper1.capturer.clone() };
-//     stream.add_output(capturer_wrapper1, SCStreamOutputType::Audio);
-
-//     stream.start_capture().unwrap();
-
-//     let ten_millis = time::Duration::from_millis(5000);
-
-//     thread::sleep(ten_millis);
-
-//     stream.stop_capture().unwrap();
-
-//     let mut whisper_ctx_params = WhisperContextParameters::default();
-//     whisper_ctx_params.use_gpu(true);
-
-//     let ctx = WhisperContext::new_with_params(
-// 		"/Users/jiaalex/Whisper/whisper.cpp/models/ggml-small.en.bin",
-// 		whisper_ctx_params
-// 	).expect("failed to load model");
-
-//     	// create a params object
-// 	let params = FullParams::new(SamplingStrategy::Greedy { best_of: 1 });
-
-// 	// assume we have a buffer of audio data
-// 	// here we'll make a fake one, floating point samples, 32 bit, 16KHz, mono
-// 	// let audio_data = &capturer_wrapper2.capturer.lock().unwrap().audio_async.get(-1);
-//     let capturer = &capturer_wrapper2.capturer.lock().unwrap();
-
-//     let audio_data = capturer.queue.try_dequeue().unwrap();
-
-// 	// now we can run the model
-// 	let mut state = ctx.create_state().expect("failed to create state");
-// 	state
-// 		.full(params, &audio_data[..])
-// 		.expect("failed to run model");
-
-// 	// fetch the results
-// 	let num_segments = state
-// 		.full_n_segments()
-// 		.expect("failed to get number of segments");
-// 	for i in 0..num_segments {
-// 		let segment = state
-// 			.full_get_segment_text(i)
-// 			.expect("failed to get segment");
-// 		let start_timestamp = state
-// 			.full_get_segment_t0(i)
-// 			.expect("failed to get segment start timestamp");
-// 		let end_timestamp = state
-// 			.full_get_segment_t1(i)
-// 			.expect("failed to get segment end timestamp");
-// 		println!("[{} - {}]: {}", start_timestamp, end_timestamp, segment);
-// 	}
-
-//     println!("Ended");
-// }
